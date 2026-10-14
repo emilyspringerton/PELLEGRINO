@@ -6,6 +6,10 @@ system rather than by turn. Readable text: [`transcript/`](transcript/) (9 parts
 measured. For what
 we adopted see `../NORTHSTAR.md`.
 
+> **Reading rule (founder, 2026-10-14; see `source/00-founder-framing.md`):** Gemini's chat carries the *vibes*; its
+> implementation — code, API names, numbers, protocol and legal claims — is assumed to be nonsense and is not used
+> directly. This digest records what was said, not what is true.
+
 ## 1. Premise
 
 A web browser engine and terminal shell written in PARENA that strips defensive browser engineering (process isolation,

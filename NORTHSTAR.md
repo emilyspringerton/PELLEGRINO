@@ -1,101 +1,77 @@
-# PELLEGRINO — NORTHSTAR (scoping pass, 2026-10-14)
+# PELLEGRINO — NORTHSTAR (vibes pass, 2026-10-14)
 
-Founder pitch, from the repo's own README and the founding conversation (`docs/transcript/`, digest in
-`docs/DESIGN_DIGEST.md`): *all gas; no brakes; powered by PARENA. "Do not confuse momentum with permission." With <4 from
-america. CLEAN BUILDS FIRST.* A web browser engine and terminal shell written in PARENA that trades decades of defensive
-browser machinery for one frame arena, a flat layout array, and rendering straight off the wire.
+**How to read this.** The founder's framing (`docs/source/00-founder-framing.md`): the Gemini conversation "is getting the
+vibes but it's totally a crack head" — keep the vibes, assume the implementation is nonsense. So this NORTHSTAR is written
+from the *feel* of the conversation. Nothing here is a spec; no code, number, API name or protocol claim from Gemini is
+adopted. Implementation gets designed fresh, in PARENA, when we build.
 
-## 1. What PELLEGRINO is
+The repo's own README already says it: *all gas; no brakes; powered by PARENA. "Do not confuse momentum with permission."
+With <4 from america. CLEAN BUILDS FIRST.*
 
-One engine, two viewports. Bytes come off a socket into a frame arena, are tokenized into a flat array of layout nodes, and
-are drawn by whichever presentation target is available: an ANSI terminal (local console or SSH) or a borderless SDL2
-window. Navigation resets the arena. There is no DOM tree, no GC, no JIT, and no per-tab process.
+## 1. The feeling
 
-Principles carried straight from the conversation:
+A browser that feels like a drag strip with a clean pit. You hit enter and words are already on the glass. Pages don't
+"load" — they pour in, packet by packet, and you can watch the internet arrive. When you leave, the whole previous page is
+just gone, instantly, like it never happened. It runs in a terminal over SSH exactly as happily as in a borderless window.
+It is small enough to hand someone on a floppy disk. It belongs to nobody, so it belongs to everybody.
 
-1. **CLEAN BUILDS FIRST** — no feature lands on an unclean build; no GC, no lazy resource management.
-2. **Arena per frame** — a page view owns one region; navigating resets it in O(1).
-3. **Flat layout array, drifting cursor** — layout is a linear pass over contiguous nodes, no pointer chasing.
-4. **Stream, don't wait** — paint chunks as they arrive; fallback font first; layout shifts are accepted.
-5. **Presentation is a non-load-bearing dependency** — terminal and SDL2 read the same layout array.
-6. **Stateless repaint mode** — a 1-second wipe-and-reload loop for live text feeds.
+## 2. The vibes, distilled
 
-## 2. What exists today (checked, not assumed)
+| Vibe | What it means for the product |
+|---|---|
+| **Speed you can see** | Text appears the moment bytes arrive; no spinner, no blank-then-pop. The network's truth is shown, not hidden. |
+| **Forgetting is a feature** | One page, one clean slate; navigate = wipe. No leaks to hunt, no accumulated cruft. The page lives and dies whole. |
+| **Shapeshifter** | The window and the terminal are two views of the same thing. Display is a guest, never a landlord. |
+| **Small, unencumbered, public** | Tiny binary, no ownership, public domain. Anyone can copy it onto anything. |
+| **Fast *and* clean** | "No brakes" works *because* of "CLEAN BUILDS FIRST": PARENA's compile-time region safety is what makes it safe to drop runtime brakes — discipline up front, none at runtime. |
+| **Terminal-native** | The browser is also a shell: you drive it by typing, pipe things through it, mutate what's on screen. |
+| **Loud, defiant, with love** | Pirate/mixtape energy, Detroit in October, an American signature, "prove us wrong." It should have a voice. |
+| **Honest and raw** | Telemetry on the glass, layout allowed to jank, unstyled-first. Beauty from being direct, not from polish. |
 
-- `PELLEGRINO/` holds only `README.md`, `LICENSE` (The Unlicense), `logo.jpg` and the ingested conversation. **No engine
-  code yet.**
-- In PARENA already: `stdlib/net/{tcp,udp,tls,http,dns,wire,secure_channel}`, built-in `sdl2`, `vec`, `string`, `buffer`,
-  region/arena primitives, `parena build X.prn -o X.c`, the `parena_compile_c` Bazel macro, `stdlib/editor/render.prn`.
-- Not in PARENA: HTML tokenizer, layout engine, CSS, HTTP/2, HTTP/3/QUIC, a Wasm host, a JS engine. These are real
-  dependencies and, per the monorepo's *Core Deps Are PARENA-First* rule, they get built in PARENA before the feature.
-- `PARENA/stdlib/gfd/browser.prn` is a separate, existing design: an FFI binding to a real embeddable engine (CEF/
-  Ultralight). PELLEGRINO is the opposite bet and does not replace it; see §6.
-- Everything in the conversation is design intent. Its code blocks are sketches that have not been built or run, and its
-  timing and size numbers (40 ms, 60 ms, 4 MB-in-L1, 240 KB, "2 ms boot") are targets to *measure*, not facts.
+## 3. What we are not taking
 
-## 3. VS0 — the cut
+All of Gemini's *how*: the code blocks, function and type names, timing and size budgets, the HTTP/3 and Wasm plumbing,
+the legal "can't be sued" reasoning, the hand-off file, the marketing mechanics. Treat them as brainstorm exhaust. If a
+number or mechanism matters, it gets rediscovered and **measured** on our own build.
 
-**VS0 = a streaming text renderer.** One page, one terminal, measured.
+## 4. The one real tension, and how the vibes resolve it
 
-`pellegrino <http-url>` fetches a page over plain HTTP, tokenizes a small HTML subset (text, `h1`–`h3`, `p`, `br`, `a`
-shown as text + target) into a flat `Vec LayoutNode` inside one frame arena, runs the drifting-cursor layout, and draws it
-to an ANSI terminal. Navigation (`stream <url>`, `wipe`) resets the arena. A fixture-driven headless test proves it.
+"All gas, no brakes" vs "CLEAN BUILDS FIRST" read like a contradiction. The consistent reading: **brakes are a runtime
+cost; cleanliness is a pre-flight guarantee.** PELLEGRINO takes its safety from the compiler (regions, no GC, no manual
+free) so the engine itself can run without guard rails. Where we genuinely can't buy safety at compile time — hostile
+content, sandboxing — we say plainly that PELLEGRINO is for trusted content rather than faking it.
 
-**Definition of done**
+## 5. What it could become
 
-- [ ] Tokenizer + flat layout + ANSI emitter written in PARENA (`PARENA/stdlib/pellegrino/*.prn`), compiling via `parena`.
-- [ ] `pellegrino` binary built from PARENA output + a thin C host; `make test` runs against recorded HTML fixtures with
-      byte-exact expected terminal output.
-- [ ] Arena reset verified (a test navigates twice and asserts the second page sees a zeroed arena).
-- [ ] A benchmark harness prints *measured* wire-to-first-glyph and full-layout times on the fixtures. Real numbers replace
-      the conversation's targets in the README.
-- [ ] README states the safety stance (§5) and honest status.
+1. **The feel demo** — pour a page onto a terminal at wire speed, wipe on navigate. Proves the feeling.
+2. **A daily driver for text** — docs, feeds, news tickers, status boards; a live "firehose" mode that just repaints.
+3. **The shapeshifter** — same engine as a window, a terminal, an SSH session; a command bar to drive it.
+4. **The mixtape** — shipped in the open, loud and small, with a public head-to-head against bloat that anyone can rerun.
 
-## 4. Phases after VS0
+## 6. First move (a hypothesis, not a spec)
 
-| Phase | Adds | Gate |
-|---|---|---|
-| P1 | SDL2 viewport over the *same* layout array (bitmap font); terminal↔SDL2 selection | both viewports render the same fixture identically |
-| P2 | Streaming/progressive paint from a live socket; visualizer overlay (packet colors, loading horizon, memory strip) | demo against a slow local server |
-| P3 | In-browser command shell (`stream`, `set`, `wipe`, `mutate`) | scripted shell session test |
-| P4 | 1-second stateless repaint mode with scroll-offset preservation | live-feed fixture |
-| P5 | TLS (reuse `net/tls`), then HTTP/2 | real https page |
-| P6 | Terminal mouse tracking over SSH; ANSI color mapping | click-through fixture |
-| P7 | Images (baseline decode), web fonts (late swap) | image fixture |
-| P8 | Size budget: static musl build, measured against the floppy target (LZ4 for any wire/IPC format per monorepo default) | CI size check |
-| Far | HTTP/3/QUIC; Wasm-hosted script worker; any CSS beyond a tiny subset | each needs its own NORTHSTAR |
+When we build: the smallest thing that gives the feeling — fetch a page and stream its words onto a terminal as they
+arrive, wipe on navigate, with a benchmark that prints real numbers so "prove us wrong" is actually true. Decisions about
+parsing, layout and display get made then, PARENA-first, against what PARENA really has. This section is deliberately thin.
 
-## 5. Stances to state plainly
+## 7. Relationships
 
-- **Safety.** No process isolation and no sandbox is a deliberate trade. PELLEGRINO is for trusted content. The README
-  says so; it is not a browser for the open web until/unless an isolation story exists.
-- **Distribution.** Signed GitHub Releases with a CONSTRUCT snapshot (monorepo Principle 21), like every other repo. The
-  conversation's "leak unsigned daily binaries / `curl | gunzip`" tactics are **not** adopted.
-- **Scripting.** No JavaScript in VS0–P8. A PARENA-native mod surface (the monorepo's existing "mods first" convention) is
-  the later answer, not an embedded JS engine.
+- **PARENA** — the language and the source of every dependency; gaps we hit become PARENA work first.
+- **`PARENA/stdlib/gfd/browser`** — a separate, existing design (FFI to a real embeddable engine). PELLEGRINO is the
+  opposite bet and sits beside it, not over it.
+- **TYLER** — the documentary/aesthetic thread in the conversation belongs to that universe; parked, not a build item.
+- **Terminal siblings (EmilyOS, PITVIPER, SAND, DUNG)** — reuse, don't fork, where terminal pieces already exist.
 
-## 6. Relationship to the rest of the monorepo
+## 8. Open questions for the founder
 
-- **PARENA** — the compiler and every core dep. Gaps found while building (HTML/CSS stdlib, layout, QUIC) become PARENA
-  work first.
-- **`gfd/browser`** — complementary. If PELLEGRINO matures, it is the native-PARENA alternative to the CEF binding for
-  embedding a document view; not a replacement.
-- **EmilyOS / PITVIPER / SAND / DUNG** — terminal-side siblings; PELLEGRINO's ANSI viewport and command shell overlap their
-  space and should reuse, not fork, any PARENA terminal pieces that exist.
-- **TYLER** — the conversation's mock-documentary/Shorts campaign ties to TYLER. Parked; not a build item.
-- **IDUNA / Apples** — PELLEGRINO files its own Apples and kanban cards like any repo; no auth in VS0.
+1. **Name.** "Pellegrino" is also a real mineral-water brand; the Unlicense covers copyright, not trademark. Keep it, keep
+   it quieter, or rename (PEREGRINE, CICINDELA, ODONATA, CYBISTER were the alternates)?
+2. **Voice.** How much of the provocation ("F*ck your trademarks", `<4 America` in headers/banners) lives in the product
+   vs. the README and art?
+3. **Safety line.** Confirm the plain statement: trusted content only, no sandbox, until a real isolation story exists.
+4. **Distribution.** Signed releases + CONSTRUCT like every repo, or something more mixtape-shaped?
 
-## 7. Open decisions for the founder
+## 9. Non-goals
 
-1. **The name.** "Pellegrino" is also a registered brand of mineral water. The Unlicense covers copyright; it does not
-   cover trademarks. Keep the name and drop the "prove us wrong" provocation, keep it as-is, or rename? (Conversation
-   candidates: PEREGRINE, CICINDELA, ODONATA, CYBISTER.)
-2. **The `<4 America` / provocation strings** in User-Agent headers and boot banners — keep, or keep to README/art only?
-3. **Terminal-first or SDL2-first** for P1 ordering (VS0 assumes terminal-first because it is testable headlessly).
-4. **gfd/browser overlap** — confirm PELLEGRINO stays a separate engine rather than an alternative backend for that module.
-5. **Hand-off file** — Gemini's generated `PELLEGRINO_HANDOFF.md` lists files that don't exist; not adopted.
-
-## 8. Non-goals
-
-A general-purpose standards-compliant browser. CSS layout parity. A JS engine. Extension ecosystem. Sandboxing. Shipping
-marketing campaigns as part of the build.
+A standards-compliant general-purpose browser. A JS engine. CSS parity. An extension ecosystem. Anything that adds runtime
+brakes to look responsible.
