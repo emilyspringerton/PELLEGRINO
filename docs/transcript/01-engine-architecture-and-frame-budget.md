@@ -1,14 +1,14 @@
 # PELLEGRINO design transcript — Part 1 — the engine: frame arenas, flat layout, the 40ms budget
 
 Source: Gemini chat (date not captured; pasted in chunks 2026-10-14)
-Opens mid-conversation (the founding prompt is not captured): the "V16, all-gas-no-brakes" browser engine on PARENA's region model.
+The founding prompts (turns 1-2, supplied by the founder after the paste): the "V16, all-gas-no-brakes" browser engine on PARENA's region model, then the 40ms target.
 Reformatted for readability only (Gemini UI artifacts and citation links stripped, code fences repaired); raw text preserved in docs/source/
 
 ---
 
 ## Turn 1 — You
 
-*(prompt not captured)*
+> ok i know this is a terrible ideabut what if we wanted to make an all gas no breaks web browser powered by parena and arenas as the v16 engine?what would that look like?think about a 1996 dodge viper with no traction control and fuck it literally no breaks we want just the sheer most memory efficient keep your shit in l1 mother fucker of a thinghttp://github.com/emilyspringerton/PARENA
 
 ### Gemini
 
@@ -83,7 +83,7 @@ If you want to sketch this out further, let me know:
 
 ## Turn 2 — You
 
-*(prompt not captured)*
+> i want the page to render in like 40ms
 
 ### Gemini
 

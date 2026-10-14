@@ -8,7 +8,7 @@ Reformatted for readability only (Gemini UI artifacts and citation links strippe
 
 ## Turn 3 — You
 
-*(prompt not captured)*
+> we embrace the fuck it i dont give a shit if the layout shifts and shit as long as its not perf bottlenecking like just render the shit onto the page as it flies off the wireunstyled fonts before the font loads? perfectif its like insane fast i can put up with a weird and jank experience
 
 ### Gemini
 
@@ -69,7 +69,7 @@ Let's keep stripping this down. What should we tackle next?
 
 ## Turn 4 — You
 
-*(prompt not captured)*
+> that would be so cooul you could like visualize the page downloading and rendering in real time
 
 ### Gemini
 

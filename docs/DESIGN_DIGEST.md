@@ -14,8 +14,8 @@ we adopted see `../NORTHSTAR.md`.
 
 A web browser engine and terminal shell written in PARENA that strips defensive browser engineering (process isolation,
 speculative-execution mitigations, GC, JIT) in exchange for speed: one frame arena, a flat layout array, streaming render
-straight off the wire. "A 1996 Dodge Viper of software engineering" (transcript 01). The conversation starts mid-thread; the
-founding prompt was not captured.
+straight off the wire. "A 1996 Dodge Viper of software engineering" (transcript 01). The first two prompts are in `source/chunk-00-first-prompts.txt`; the
+rest of the user side was not captured.
 
 ## 2. Memory model
 
