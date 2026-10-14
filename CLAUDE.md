@@ -17,3 +17,9 @@ Read the monorepo root `CLAUDE.md` (The Emily Way) first; this file is repo-spec
 - VS0 quirks learned: `let` only as a function/let/match/if-condition body (not inside `do`); no variadic `+`;
   `when` is unreliable as an expression (use `if ... 0`); pass arenas as `&mut a`; lowercase `f64/i32` types are
   invalid (`F64`/`I32`); multi-file builds need `string array io sdl2` in that order.
+- **TLS verification is never optional.** There is deliberately no flag/env/API to disable certificate or hostname
+  checks; do not add one (not "for testing" either — tests mint their own CA and point `SSL_CERT_FILE` at it, see
+  `tests/smoke.sh`). Do not hand-roll crypto: TLS is mbedTLS via PARENA's `net/stream`.
+- **mbedTLS is pinned** in two places that must agree (`MODULE.bazel` and `third_party/mbedtls/mbedtls.env`;
+  `//:check_pins` enforces it). Its config is `third_party/mbedtls/pellegrino_user_config.h` (static-heap allocator).
+- **Releases ship `cacert.pem`** (Windows has no system trust store). Keep it in both zips.

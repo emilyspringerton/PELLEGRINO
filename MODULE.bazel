@@ -14,5 +14,17 @@ bazel_dep(name = "parena", version = "0.0.0")
 git_override(
     module_name = "parena",
     remote = "https://github.com/emilyspringerton/PARENA.git",
-    commit = "0f325c5be881763a50afc0d3d847ba76215b729e",
+    commit = "aa05cc95dc8766e43d5f2fc8aa0cb0e091d032ae",
+)
+
+# mbedTLS (TLS client for https://), built from source so it can allocate from a static buffer (NO MALLOC).
+# Pin: third_party/mbedtls/mbedtls.env is the readable copy; tests/check_pins.sh keeps the two equal.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "mbedtls",
+    build_file = "//third_party/mbedtls:mbedtls.BUILD",
+    sha256 = "a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6",
+    strip_prefix = "mbedtls-3.6.7",
+    urls = ["https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2"],
 )

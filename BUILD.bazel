@@ -28,17 +28,42 @@ cc_binary(
         "-lSDL2",
         "-lm",
     ],
-    deps = ["@parena//runtime:parena_runtime"],
+    # HTTPS: the PARENA runtime's TLS half of net/stream, over mbedTLS from third_party/ (static heap, so
+    # still no malloc; the user config in third_party/mbedtls turns on the buffer allocator).
+    copts = [
+        "-DPARENA_WITH_TLS",
+        "-DPARENA_TLS_STATIC_HEAP",
+        "-DPARENA_TLS_HEAP_STATS",
+    ],
+    deps = [
+        "@mbedtls",
+        "@parena//runtime:parena_runtime",
+    ],
 )
 
-# Headless smoke tests: open the borderless window under Xvfb, stream the embedded page AND a live
-# HTTP page from a local server, exit cleanly, and check the real text log file the run wrote.
+# Headless smoke tests: open the borderless window under Xvfb, stream the embedded page, a live HTTP
+# page, redirects and live HTTPS (trusted, untrusted and wrong-host certificates) from local servers,
+# exit cleanly, and check the real text log file the run wrote.
 sh_test(
     name = "smoke",
     srcs = ["tests/smoke.sh"],
-    data = [":pellegrino"],
+    data = [
+        ":pellegrino",
+        "tests/smoke_server.py",
+    ],
     tags = [
         "local",
+        "requires-openssl",
         "requires-xvfb",
+    ],
+)
+
+# The mbedTLS pin is spelled in MODULE.bazel and third_party/mbedtls/mbedtls.env; they must agree.
+sh_test(
+    name = "check_pins",
+    srcs = ["tests/check_pins.sh"],
+    data = [
+        "MODULE.bazel",
+        "//third_party/mbedtls:mbedtls.env",
     ],
 )
