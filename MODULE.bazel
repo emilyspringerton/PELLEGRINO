@@ -1,0 +1,18 @@
+"""PELLEGRINO -- streaming text renderer / terminal shell, pure PARENA + a slim C host (Bazel)."""
+
+module(
+    name = "pellegrino",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "parena", version = "0.0.0")
+
+# PARENA is pinned by commit (bump deliberately). Local development against a sibling checkout:
+#   bazelisk build //:pellegrino --override_module=parena=../PARENA
+git_override(
+    module_name = "parena",
+    remote = "https://github.com/emilyspringerton/PARENA.git",
+    commit = "523d36e2eb79ca7592c967928b17fef908a1b98d",
+)

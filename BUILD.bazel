@@ -1,0 +1,43 @@
+load("@parena//bazel:parena_compile.bzl", "parena_compile_c")
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# pellegrino.prn (+ the PARENA stdlib it stands on) -> C. Output is a .inc so the host can #include it
+# as a single translation unit instead of Bazel compiling it as a second, symbol-duplicating .c file.
+parena_compile_c(
+    name = "pellegrino_gen",
+    prn = "pellegrino.prn",
+    out = "pellegrino_gen.inc",
+    deps = [
+        "@parena//stdlib:string.prn",
+        "@parena//stdlib:array.prn",
+        "@parena//stdlib:io.prn",
+        "@parena//stdlib:sdl2.prn",
+    ],
+)
+
+# The slim C host: main() + log redirection. Everything else is the generated PARENA.
+cc_binary(
+    name = "pellegrino",
+    srcs = [
+        "pellegrino_host.c",
+        ":pellegrino_gen",
+    ],
+    linkopts = [
+        "-lSDL2",
+        "-lm",
+    ],
+    deps = ["@parena//runtime:parena_runtime"],
+)
+
+# Headless smoke test: opens the borderless window under Xvfb, streams the embedded page, exits
+# cleanly, and checks the real text log file the run wrote.
+sh_test(
+    name = "smoke",
+    srcs = ["tests/smoke.sh"],
+    data = [":pellegrino"],
+    tags = [
+        "local",
+        "requires-xvfb",
+    ],
+)

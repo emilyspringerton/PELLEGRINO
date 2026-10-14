@@ -1,0 +1,199 @@
+;; pellegrino.prn -- PELLEGRINO v0: streaming text renderer, borderless SDL2 window.
+;; Pure PARENA; the C harness (pellegrino_host.c) only owns main(), the static memory pool and
+;; log redirection. No malloc anywhere in this file or the harness (built -DPARENA_NO_MALLOC).
+;;
+;; v0 scope (agile, working software first): bytes "pour onto the glass" from a source (embedded
+;; page, or a file path argument), tags are stripped, layout is a drifting cursor over a cell grid,
+;; glyphs are drawn from an embedded 5x8 bitmap font via filled rects. Newly arrived bytes are
+;; tinted (the packet visualizer vibe) and a loading-horizon line tracks the stream front.
+;; Not yet: live network (net/tcp is POSIX-only today; a winsock backend is PARENA core-dep work),
+;; HTTP/2/3, CSS, images. See NORTHSTAR.md.
+
+(module pellegrino)
+(import string)
+(export pellegrino-run)
+
+;; 5x8 font, ASCII 32..126, 8 rows x 1 byte each = 16 hex chars per glyph (tools/gen_font.py).
+(defn font-data [] : String
+  "000000000000000004040404040004000A0A0A00000000000A1F0A0A1F0A0000040F140E051E0400191A0204080B13000C12140815120D0004040800000000000204080808040200080402020204080000150E1F0E1500000004041F04040000000000000C0408000000001F0000000000000000000C0C0001020204080810000E11131519110E00040C040404040E000E11010204081F000E11010601110E0002060A121F0202001F101E0101110E000608101E11110E001F010204080808000E11110E11110E000E11110F01020C00000C0C000C0C000000000C0C000C0408020408100804020000001F001F00000008040201020408000E110102040004000E11171517100E000E11111F111111001E11111E11111E000E11101010110E001E11111111111E001F10101E10101F001F10101E101010000E11101711110F001111111F111111000E04040404040E000702020202120C0011121418141211001010101010101F00111B15151111110011191513111111000E11111111110E001E11111E101010000E11111115120D001E11111E141211000F10100E01011E001F040404040404001111111111110E0011111111110A040011111115151B110011110A040A11110011110A04040404001F01020408101F000E08080808080E0010080804020201000E02020202020E00040A110000000000000000000000001F080402000000000000000E010F110F0010101E1111111E0000000E1010110E0001010F1111110F0000000E111F100E000609081C0808080000000F1111110F0E10101E111111110004000C0404040E00020006020202020C10101214181412000C04040404040E0000001A151511110000001E111111110000000E1111110E0000001E1111111E1000000F1111110F01000016191010100000000F100E011E0008081C08080906000000111111130D0000001111110A04000000111115150A000000110A040A11000000111111110F0E00001F0204081F00060808100808060004040404040404000C02020102020C000000081502000000")
+
+(defn hexv [(c : I32)] : I32
+  (if (>= c 65) (- c 55) (- c 48)))
+
+(defn font-row [(ch : I32) (r : I32)] : I32
+  (let [f (font-data)
+        off (+ (* 16 (- ch 32)) (* 2 r))]
+    (+ (* 16 (hexv (string/char-at f off))) (hexv (string/char-at f (+ off 1))))))
+
+(defn pg-log [(msg : String @ Region)] : I32
+  (let [fd (raw-open "pellegrino.log" 2)]
+    (if (< fd 0)
+      -1
+      (do (raw-write fd msg)
+          (raw-write fd "\n")
+          (raw-close fd)
+          0))))
+
+(defn pg-log-n [(label : String @ Region) (n : I32) (dest : Arena @ Region)] : I32
+  (pg-log (string/concat label (string/i32-to-string n dest) dest)))
+
+;; one bit of a row byte: col 0 = leftmost (bit 4)
+(defn bit-at [(b : I32) (c : I32)] : I32
+  (let [p (cond ((= c 0) 16) ((= c 1) 8) ((= c 2) 4) ((= c 3) 2) (true 1))]
+    (mod (/ b p) 2)))
+
+(defn draw-row [(ren : I32) (b : I32) (x : I32) (y : I32) (s : I32)] : I32
+  (loop [c 0]
+    (if (>= c 5)
+      0
+      (do (if (= (bit-at b c) 1)
+              (sdl2-raw-render-fill-rect ren (+ x (* c s)) y s s)
+              0)
+          (recur (+ c 1))))))
+
+(defn draw-glyph [(ren : I32) (ch : I32) (x : I32) (y : I32) (s : I32)] : I32
+  (if (or (< ch 33) (> ch 126))
+    0
+    (loop [r 0]
+      (if (>= r 8)
+        0
+        (do (draw-row ren (font-row ch r) x (+ y (* r s)) s)
+            (recur (+ r 1)))))))
+
+;; draws a literal string at (x,y); returns nothing useful
+(defn draw-str [(ren : I32) (s : String @ Region) (x : I32) (y : I32)] : I32
+  (let [n (string/length s)]
+    (loop [i 0]
+      (if (>= i n)
+        0
+        (do (draw-glyph ren (string/char-at s i) (+ x (* i 12)) y 2)
+            (recur (+ i 1)))))))
+
+;; tag-start newline rule: <br> <p> <h*> <div> <li> <tr> and their closers start a new line
+(defn breaks? [(page : String @ Region) (i : I32)] : Bool
+  (let [c1 (string/char-at page (+ i 1))
+        c2 (string/char-at page (+ i 2))]
+    (or (= c1 98) (= c1 112) (= c1 104) (= c1 100) (= c1 108) (= c1 116)
+        (and (= c1 47) (or (= c2 112) (= c2 104) (= c2 100) (= c2 108) (= c2 116))))))
+
+;; Drifting-cursor layout + draw in one pass over the first `revealed` bytes.
+;; Returns the row index just past the last drawn row (for the loading horizon).
+(defn draw-cell [(ren : I32) (c : I32) (i : I32) (revealed : I32) (vis : Bool) (px : I32) (py : I32)] : I32
+  (if vis
+    (do (if (< (- revealed i) 160)
+          (sdl2-raw-set-draw-color ren 255 176 64 255)
+          (sdl2-raw-set-draw-color ren 216 216 216 255))
+        (draw-glyph ren c px py 2))
+    0))
+
+(defn draw-page [(ren : I32) (page : String @ Region) (revealed : I32) (scroll : I32)
+                 (cols : I32) (rows : I32) (x0 : I32) (y0 : I32)] : I32
+  (loop [i 0 col 0 row 0 tag 0]
+    (if (>= i revealed)
+      row
+      (let [c (string/char-at page i)]
+        (cond
+          ((= tag 1)
+           (recur (+ i 1) col row (if (= c 62) 0 1)))
+          ((= c 60)
+           (if (breaks? page i)
+             (recur (+ i 1) 0 (if (> col 0) (+ row 1) row) 1)
+             (recur (+ i 1) col row 1)))
+          ((= c 10) (recur (+ i 1) 0 (+ row 1) 0))
+          ((= c 13) (recur (+ i 1) col row 0))
+          (true
+           (let [wrap (>= col cols)
+                 r (if wrap (+ row 1) row)
+                 cc (if wrap 0 col)
+                 vis (and (>= r scroll) (< r (+ scroll rows)))]
+             (do (draw-cell ren c i revealed vis (+ x0 (* cc 12)) (+ y0 (* (- r scroll) 18)))
+                 (recur (+ i 1) (+ cc 1) r 0)))))))))
+
+(defn embedded-page [] : String
+  "<h1>PELLEGRINO v0</h1>
+<p>all gas; no brakes; powered by PARENA.</p>
+<p>CLEAN BUILDS FIRST.</p>
+<p>This text is pouring onto the glass byte by byte: tags are stripped, the cursor drifts, and the newest bytes glow amber.</p>
+<p>Keys: Up/Down/Home/End or mouse wheel to scroll, Esc or q to quit.</p>
+<p>Pass a file path as the first argument to stream your own page.</p>
+<p>With love, <4 America.</p>
+")
+
+(defn render-frame [(ren : I32) (page : String @ Region) (nrev : I32) (n : I32) (scroll : I32)
+                    (cols : I32) (rows : I32) (win-w : I32) (win-h : I32)] : I32
+  (let [bg (sdl2-raw-set-draw-color ren 18 18 18 255)
+        cl (sdl2-raw-render-clear ren)
+        last-row (draw-page ren page nrev scroll cols rows 12 12)
+        c1 (sdl2-raw-set-draw-color ren 214 137 16 255)
+        hz (if (< nrev n)
+             (sdl2-raw-render-fill-rect ren 0 (+ (+ 12 (* (- last-row scroll) 18)) 20) win-w 2)
+             0)
+        c2 (sdl2-raw-set-draw-color ren 60 60 60 255)
+        ln (sdl2-raw-render-fill-rect ren 0 (- win-h 30) win-w 1)
+        c3 (sdl2-raw-set-draw-color ren 166 68 14 255)
+        tx (draw-str ren "PELLEGRINO v0  esc=quit  up/down=scroll" 12 (- win-h 24))]
+    (do (sdl2-raw-render-present ren) 0)))
+
+(defn advance [(revealed : I32) (step : I32) (n : I32)] : I32
+  (let [r (+ revealed step)]
+    (if (>= revealed n) n (if (> r n) n r))))
+
+(defn frame-loop [(ren : I32) (page : String @ Region) (n : I32) (win-w : I32) (win-h : I32)
+                  (limit : I32) (dest : Arena @ Region)] : I32
+  (let [cols (/ (- win-w 24) 12)
+        rows (/ (- win-h 52) 18)
+        step (if (> (/ n 120) 48) (/ n 120) 48)]
+    (loop [revealed 0 scroll 0 dirty 1 frames 0]
+      (let [ev (sdl2-raw-poll-event)]
+        (cond
+          ((and (> limit 0) (>= frames limit)) (do (pg-log-n "smoke limit reached; frames=" frames dest) frames))
+          ((= ev 1) (do (pg-log-n "quit event; frames=" frames dest) frames))
+          ((= ev 2)
+           (let [k (sdl2-raw-last-event-key)]
+             (cond
+               ((or (= k 27) (= k 113)) (do (pg-log-n "quit key; frames=" frames dest) frames))
+               ((= k (key-up)) (recur revealed (if (> scroll 0) (- scroll 1) 0) 1 frames))
+               ((= k (key-down)) (recur revealed (+ scroll 1) 1 frames))
+               ((= k (key-home)) (recur revealed 0 1 frames))
+               ((= k (key-end)) (recur revealed (+ scroll 20) 1 frames))
+               (true (recur revealed scroll dirty frames)))))
+          ((= ev 9)
+           (let [s (- scroll (* (sdl2-raw-last-event-wheel-delta) 3))]
+             (recur revealed (if (> s 0) s 0) 1 frames)))
+          ((> ev 0) (recur revealed scroll dirty frames))
+          (true
+           (let [nrev (advance revealed step n)
+                 redraw (or (= dirty 1) (> nrev revealed))]
+             (do (if redraw
+                   (render-frame ren page nrev n scroll cols rows win-w win-h)
+                   (sdl2_delay_raw 8))
+                 (recur nrev scroll 0 (+ frames 1))))))))))
+
+(defn sdl2_delay_raw [(ms : I32)] : I32
+  #target
+  {:c (inline-c "(sdl2_delay_impl(ms), 0)")})
+
+(defn pellegrino-run [(arg : String @ Region)] : I32
+  (with-arena [a :region/scratch 65536]
+    (do
+      (pg-log "pellegrino v0 start")
+      (let [smoke (string/str-eq? arg "--smoke")
+            fd (if (and (> (string/length arg) 0) (not smoke)) (raw-open arg 0) -1)
+            page (if (>= fd 0) (raw-read-all fd &mut a) (embedded-page))
+            n (string/length page)]
+        (do
+          (pg-log-n "source bytes=" n &mut a)
+          (if (< (sdl2-raw-init) 0)
+            (do (pg-log "SDL init FAILED") 1)
+            (let [win (sdl2-raw-create-window-borderless "PELLEGRINO" 1280 720)]
+              (if (< win 0)
+                (do (pg-log "window create FAILED") 2)
+                (let [ren (sdl2-raw-create-renderer win)]
+                  (if (< ren 0)
+                    (do (pg-log "renderer create FAILED") 3)
+                    (do (pg-log "window+renderer up (borderless 1280x720)")
+                        (frame-loop ren page n 1280 720 (if smoke 90 0) &mut a)
+                        (sdl2-raw-destroy-renderer ren)
+                        (sdl2-raw-destroy-window win)
+                        (pg-log "clean exit")
+                        0)))))))))))

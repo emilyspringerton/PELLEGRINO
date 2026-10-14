@@ -1,0 +1,13 @@
+# PELLEGRINO Bazel config.
+# NO MALLOC: the PARENA runtime serves every arena block from a static pool. These defines must reach
+# the runtime library too (not just the host), hence global --copt rather than per-target defines.
+build --conlyopt=-std=gnu99
+build --copt=-O2
+build --copt=-Wall
+build --copt=-Wextra
+build --copt=-DPARENA_NO_MALLOC
+build --copt=-DPARENA_NO_TTF
+build --copt=-DPARENA_STATIC_POOL_BYTES=33554432
+build --copt=-DPARENA_STATIC_BLOCK_BYTES=262144
+test --test_output=errors
+try-import %workspace%/user.bazelrc

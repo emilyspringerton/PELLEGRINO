@@ -1,0 +1,205 @@
+name: PELLEGRINO CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: write
+
+# Serialize per ref so two pushes can't compute the same next tag and race each other (queued, not
+# cancelled: each run sees the previous run's tag). Same factory as SHANKPIT / D2.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+# Build (Bazel) + headless smoke test + Principle 21 CONSTRUCT, then bundle the real clients:
+#   pellegrino_linux_x86_64.zip  = binary + bundled libSDL2 + RUN.sh (+ CONSTRUCT)
+#   pellegrino_windows.zip       = pellegrino.exe + SDL2.dll + RUN.bat (+ CONSTRUCT), flat, no folder prefix
+# Every green push to main auto-bumps the MINOR version, tags, and publishes a GitHub Release.
+# Every run writes logs to real text files next to the executable (pellegrino.log etc.) -- see RUN.bat/RUN.sh.
+jobs:
+  version:
+    name: Compute version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" = "refs/heads/main" ] && [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            latest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)"
+            if [ -z "$latest" ]; then major=0; minor=0; else
+              ver="${latest#v}"; major="$(echo "$ver" | cut -d. -f1)"; minor="$(echo "$ver" | cut -d. -f2)"; fi
+            tag="v${major}.$((minor + 1)).0"
+            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+            echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build + test (Bazel), construct, Linux bundle
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      BAZEL: bazelisk
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps (SDL2, Xvfb, zip, bazelisk)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev xvfb zip file
+          sudo curl -fsSL -o /usr/local/bin/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
+          sudo chmod +x /usr/local/bin/bazelisk
+      - name: Bazel build + test (PARENA -> C -> binary, headless smoke under Xvfb)
+        run: bazelisk test //... --copt=-DPELLEGRINO_VERSION='"${{ needs.version.outputs.version }}"'
+      - name: Generate Source Construct (Principle 21), verify determinism
+        run: |
+          set -euo pipefail
+          bash scripts/generate_construct.sh PELLEGRINO_CONSTRUCT.txt
+          bash scripts/generate_construct.sh PELLEGRINO_CONSTRUCT.txt.check
+          cmp PELLEGRINO_CONSTRUCT.txt PELLEGRINO_CONSTRUCT.txt.check
+          rm PELLEGRINO_CONSTRUCT.txt.check
+      - name: Bundle Linux client
+        env:
+          BAZEL_FLAGS: --copt=-DPELLEGRINO_VERSION="${{ needs.version.outputs.version }}"
+        run: bash scripts/package_linux.sh
+      - name: Collision-safe names
+        run: |
+          set -euo pipefail
+          BUILD="build_${{ github.run_number }}_${GITHUB_SHA::7}"
+          mkdir -p artifacts
+          cp dist/pellegrino_linux_x86_64.zip "artifacts/PELLEGRINO_Linux_${BUILD}.zip"
+          cp PELLEGRINO_CONSTRUCT.txt "artifacts/PELLEGRINO_CONSTRUCT_${BUILD}.txt"
+          gzip -k "artifacts/PELLEGRINO_CONSTRUCT_${BUILD}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PELLEGRINO_Builds_${{ github.run_number }}_${{ github.sha }}
+          path: artifacts/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PELLEGRINO_Release_Linux_${{ github.run_number }}
+          path: |
+            dist/pellegrino_linux_x86_64.zip
+            PELLEGRINO_CONSTRUCT.txt
+          if-no-files-found: error
+
+  windows:
+    name: Windows cross-build (mingw), bundle exe + SDL2.dll + RUN.bat
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      BAZEL: bazelisk
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw, SDL2-mingw, bazelisk
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 libsdl2-dev zip file
+          sudo curl -fsSL -o /usr/local/bin/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
+          sudo chmod +x /usr/local/bin/bazelisk
+          curl -fsSL -o sdl2-mingw.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-devel-2.30.9-mingw.tar.gz
+          tar xzf sdl2-mingw.tar.gz
+          echo "SDL2_MINGW=$PWD/SDL2-2.30.9/x86_64-w64-mingw32" >> "$GITHUB_ENV"
+      - name: Generate Source Construct
+        run: bash scripts/generate_construct.sh PELLEGRINO_CONSTRUCT.txt
+      - name: "Cross-compile and bundle (flat zip - exe + SDL2.dll + RUN.bat)"
+        env:
+          PELLEGRINO_VERSION: ${{ needs.version.outputs.version }}
+        run: bash scripts/package_windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PELLEGRINO_Builds_Windows_${{ github.run_number }}_${{ github.sha }}
+          path: dist/pellegrino_windows.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PELLEGRINO_Release_Windows_${{ github.run_number }}
+          path: dist/pellegrino_windows.zip
+          if-no-files-found: error
+
+  release:
+    name: Tag & Release
+    needs: [version, build, windows]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir out
+          cp artifacts/PELLEGRINO_Release_Linux_*/pellegrino_linux_x86_64.zip out/
+          cp artifacts/PELLEGRINO_Release_Linux_*/PELLEGRINO_CONSTRUCT.txt out/
+          cp artifacts/PELLEGRINO_Release_Windows_*/pellegrino_windows.zip out/
+          # Tag server-side via the release API (a plain git push of the tag is rejected for workflow-file reasons).
+          gh release create "$TAG" out/* --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+      - name: Sign + publish to IDUNA app-release registry
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.EINHORN_APP_RELEASES_GPG_PRIVATE_KEY }}
+          APP_RELEASES_CI_SECRET: ${{ secrets.APP_RELEASES_CI_SECRET }}
+          IDUNA_BASE_URL: https://okemily.com
+        run: |
+          set -euo pipefail
+          if [ -z "${GPG_PRIVATE_KEY:-}" ] || [ -z "${APP_RELEASES_CI_SECRET:-}" ]; then
+            echo "app-release signing secrets not configured yet -- skipping publish (see IDUNA/docs/APP_RELEASE_SIGNING.md)"
+            exit 0
+          fi
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          KEYID="A9BEEFEC4DF16C2E"
+          for pkg in out/pellegrino_linux_x86_64.zip:linux_x86_64 out/pellegrino_windows.zip:windows_x86_64; do
+            file="${pkg%%:*}"; platform="${pkg##*:}"
+            gpg --batch --yes --local-user "$KEYID" --detach-sign --armor -o "$file.sig" "$file"
+            TOKEN="$(curl -sf -X POST "$IDUNA_BASE_URL/api/v1/auth/agent" -H 'Content-Type: application/json' \
+              -d "{\"agent_name\":\"APP-RELEASES-CI\",\"agent_secret\":\"$APP_RELEASES_CI_SECRET\"}" \
+              | python3 -c "import json,sys;print(json.load(sys.stdin)['access_token'])")"
+            # NOTE: IDUNA's app-release registry needs an app_slug "pellegrino" registered (IDUNA/internal/games).
+            curl -sf -X POST "$IDUNA_BASE_URL/api/v1/app-releases" \
+              -H "Authorization: Bearer $TOKEN" \
+              -F "binary=@${file}" -F "app_slug=pellegrino" -F "platform=${platform}" \
+              -F "version=${{ needs.version.outputs.version }}" \
+              -F "gpg_signature=$(cat "${file}.sig")" -F "gpg_key_id=${KEYID}" \
+              -F "github_commit_sha=${GITHUB_SHA}" \
+              -F "github_run_url=https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "published ${file} (${platform})"
+          done
+
+  pages:
+    name: Deploy landing page (GitHub Pages)
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    continue-on-error: true   # no-op until Pages is enabled for this repo (Settings -> Pages -> Source: GitHub Actions)
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - uses: actions/deploy-pages@v4

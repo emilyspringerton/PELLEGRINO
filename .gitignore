@@ -1,0 +1,6 @@
+bazel-*
+build/
+dist/
+*.log
+MODULE.bazel.lock
+user.bazelrc

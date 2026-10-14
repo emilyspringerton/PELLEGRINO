@@ -8,6 +8,13 @@ adopted. Implementation gets designed fresh, in PARENA, when we build.
 The repo's own README already says it: *all gas; no brakes; powered by PARENA. "Do not confuse momentum with permission."
 With <4 from america. CLEAN BUILDS FIRST.*
 
+## 0. Status (2026-10-14)
+
+v0 is built and shipping: a borderless SDL2 window streaming a page (embedded or file) onto the glass, pure
+PARENA + a ~25-line C host, no malloc, logs to real files, Bazel build, headless smoke test, and CI that
+auto-tags and releases Linux + Windows bundles on every green push to `main`. The product page is `site/`.
+See `README.md` for the honest built / not-built split. Everything below this section is still the direction.
+
 ## 1. The feeling
 
 A browser that feels like a drag strip with a clean pit. You hit enter and words are already on the glass. Pages don't

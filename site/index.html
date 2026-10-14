@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PELLEGRINO</title>
+<meta name="description" content="A web browser and terminal shell stripped to essentials. No defensive layers. No garbage collection. No compromise on speed. All gas. No brakes. Powered by PARENA.">
+<link rel="icon" href="favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #141414;
+    --bg-2: #181818;
+    --ink: #ececea;
+    --muted: #9a9a96;
+    --faint: #6d6d69;
+    --line: #2a2a28;
+    --teal: #087f7f;
+    --cyan: #1fc4d6;
+    --paper: #f7f6f1;
+    --paper-ink: #141414;
+    --display: "Barlow Condensed", "Arial Narrow", Impact, sans-serif;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  a { color: inherit; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding-inline: 24px; }
+  .mono { font-family: var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+
+  .topbar { border-bottom: 1px solid var(--line); font-size: 10px; color: var(--faint); }
+  .topbar .wrap { display: flex; justify-content: space-between; gap: 16px; padding-block: 14px; flex-wrap: wrap; }
+
+  .hero { text-align: center; padding: 72px 0 80px; }
+  .hero img { width: min(420px, 78vw); height: auto; display: block; margin: 0 auto -8px; }
+  .wordmark { font-family: var(--display); font-weight: 700; color: var(--teal); font-size: clamp(64px, 14vw, 132px); line-height: 1; letter-spacing: .01em; margin: 0; }
+  .hero p.lede { max-width: 440px; margin: 40px auto 0; color: #cfcfcb; font-size: 15px; }
+  .hero .tag { margin-top: 30px; font-size: 10px; color: var(--cyan); }
+  .buttons { display: flex; justify-content: center; gap: 12px; margin-top: 28px; flex-wrap: wrap; }
+  .btn { font-family: var(--mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; text-decoration: none; padding: 14px 20px; border: 1px solid var(--line); color: var(--ink); background: transparent; }
+  .btn.primary { background: var(--cyan); border-color: var(--cyan); color: #06181b; font-weight: 500; }
+  .btn:hover { filter: brightness(1.12); }
+
+  section { border-top: 1px solid var(--line); }
+  .quote { text-align: center; padding: 92px 0; }
+  .quote blockquote { margin: 0; font-family: var(--display); font-weight: 600; font-size: clamp(34px, 6vw, 56px); line-height: 1.04; text-transform: uppercase; letter-spacing: .005em; }
+
+  h2 { font-family: var(--display); font-weight: 700; text-transform: uppercase; font-size: clamp(30px, 4.4vw, 40px); line-height: 1.05; margin: 0; }
+  .looking { padding: 88px 0 96px; }
+  .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; margin-top: 52px; }
+  .col { border-top: 1px solid var(--cyan); padding-top: 18px; }
+  .col .n { font-family: var(--mono); font-size: 10px; color: var(--faint); letter-spacing: .1em; }
+  .col h3 { font-family: var(--display); font-weight: 700; text-transform: uppercase; color: var(--cyan); font-size: 26px; margin: 10px 0 12px; letter-spacing: .02em; }
+  .col p { margin: 0; color: #cfcfcb; font-size: 13px; }
+
+  .why { padding: 88px 0 96px; }
+  .why .grid { display: grid; grid-template-columns: 1fr 1.2fr; gap: 56px; align-items: start; }
+  .why p { margin: 0 0 22px; font-size: 13px; color: #cfcfcb; }
+  .why .code { font-family: var(--mono); font-size: 11.5px; color: var(--cyan); line-height: 1.7; }
+  .why .fine { color: var(--muted); }
+
+  .numbers { background: var(--paper); color: var(--paper-ink); padding: 88px 0 96px; border-top: 0; }
+  .numbers h2 { color: var(--paper-ink); }
+  .nums { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; margin-top: 40px; }
+  .num { border-top: 1px solid #3a3a38; padding-top: 14px; }
+  .num .big { font-family: var(--display); font-weight: 700; color: var(--teal); text-transform: uppercase; font-size: clamp(44px, 7vw, 64px); line-height: 1; }
+  .num .lab { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: #5a5a56; margin-top: 8px; }
+  .numbers p.note { max-width: 560px; font-size: 13px; margin: 48px 0 0; color: #2a2a28; }
+
+  .cta { padding: 88px 0 72px; }
+  .cta h2 { font-size: clamp(44px, 8vw, 72px); }
+  .cta .clone { display: inline-block; margin: 28px 0 0; padding: 12px 16px; border: 1px solid var(--line); background: var(--bg-2); font-family: var(--mono); font-size: 11px; color: #cfcfcb; overflow-wrap: anywhere; }
+  .cta .buttons { justify-content: flex-start; margin-top: 22px; }
+
+  footer { border-top: 1px solid var(--line); font-size: 10px; color: var(--faint); }
+  footer .wrap { display: flex; justify-content: space-between; gap: 16px; padding-block: 22px; flex-wrap: wrap; }
+
+  @media (max-width: 760px) {
+    .cols, .nums { grid-template-columns: 1fr; }
+    .why .grid { grid-template-columns: 1fr; gap: 28px; }
+    .hero { padding-top: 48px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar mono"><div class="wrap"><span>Carrier wave active // custody confirmed</span><span>Public domain · The Unlicense</span></div></div>
+
+<header class="hero">
+  <div class="wrap">
+    <img src="falcon.png" alt="Wireframe peregrine falcon in flight">
+    <h1 class="wordmark">PELLEGRINO</h1>
+    <p class="lede">A web browser and terminal shell stripped to essentials. No defensive layers. No garbage collection. No compromise on speed.</p>
+    <div class="tag mono">All gas. No brakes. Powered by PARENA.</div>
+    <div class="buttons">
+      <a class="btn primary" href="https://github.com/emilyspringerton/PELLEGRINO/releases/latest">Take the build</a>
+      <a class="btn" href="#why">Why it works</a>
+    </div>
+  </div>
+</header>
+
+<section class="quote"><div class="wrap"><blockquote>“Do not confuse momentum with permission.”</blockquote></div></section>
+
+<section class="looking" id="looking">
+  <div class="wrap">
+    <h2>What you’re looking at</h2>
+    <div class="cols">
+      <div class="col"><div class="n">01</div><h3>Memory</h3><p>Strict memory ceilings. No hidden overhead. Built to stay entirely within the closest reaches of the CPU cache. Every frame evaporates instantly at reset.</p></div>
+      <div class="col"><div class="n">02</div><h3>Streaming</h3><p>Direct data processing. No intermediate translation layers or allocation taxes. The engine reads the wire and prints to the glass.</p></div>
+      <div class="col"><div class="n">03</div><h3>Display</h3><p>Fluid presentation. Seamlessly hot-swaps between high-speed graphical viewports and raw text-only terminal windows. One pipeline, two endpoints.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="why" id="why">
+  <div class="wrap grid">
+    <h2>Why it works</h2>
+    <div>
+      <p>Decades of defensive engineering—sandboxing, constant context switches, and heavy tracking wrappers—created layers of abstraction. Layers have a cost. PELLEGRINO trades those layers for constraints.</p>
+      <p class="code">Tight memory. Single execution context. Direct buffer access. The constraints are the point.</p>
+      <p class="fine">This is not a bet on raw CPU power. It’s a bet that removing bloat gives you more than the hardware ever could. If the modern web had not committed the great sins of infinite memory sprawl and sluggish design, the machine would not have required a correction like PELLEGRINO to clear the glass.</p>
+    </div>
+  </div>
+</section>
+
+<section class="numbers">
+  <div class="wrap">
+    <h2>The numbers</h2>
+    <div class="nums">
+      <div class="num"><div class="big">Minimal</div><div class="lab">Rigid memory ceiling.</div></div>
+      <div class="num"><div class="big">0 ms</div><div class="lab">Reset cost.</div></div>
+      <div class="num"><div class="big">Compact</div><div class="lab">Floppy disk constraint.</div></div>
+    </div>
+    <p class="note">Releasing this entire framework under The Unlicense means ownership is completely out of the equation. It belongs to the streets as a public fact of the machine. The build is mathematically clean, the room is quiet, the autumn leaves are changing, and the firehose is ready.</p>
+  </div>
+</section>
+
+<section class="cta">
+  <div class="wrap">
+    <h2>Clean builds first.</h2>
+    <div class="clone">git clone https://github.com/emilyspringerton/PELLEGRINO.git</div>
+    <div class="buttons">
+      <a class="btn primary" href="https://github.com/emilyspringerton/PELLEGRINO/releases/latest">Take the build</a>
+      <a class="btn" href="https://github.com/emilyspringerton/PELLEGRINO/blob/main/NORTHSTAR.md">Read the manifest</a>
+    </div>
+  </div>
+</section>
+
+<footer class="mono"><div class="wrap"><span>With &lt;4 from America</span><span>Powered by PARENA</span></div></footer>
+
+</body>
+</html>
