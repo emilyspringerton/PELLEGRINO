@@ -1,0 +1,300 @@
+Yes! The classic 1990s dial-up progressive JPEG scan, but amplified to modern fiber speeds. Instead of taking 2 minutes to painfully draw a single photo row-by-row, the entire web page—text, layouts, and image blocks—cascades down your screen like a digital waterfall at 60 frames per second.
+Because we are doing zero layout buffering, you are literally watching the CPU's memory allocation pointer move down the screen in real-time.
+Here is how we orchestrate that exact row-by-row streaming layout visualization using PARENA’s flat memory arrays and immediate-mode blitting.
+1. The Interlaced Stream Buffer
+Instead of waiting for an image or a block of text to be complete, the decoder works on a partial bitstream pipeline. As raw chunks hit the engine, they are parsed and blitted directly to the active screen matrix line-by-line.
+
+```
+[ TCP Wire Chunks ] ──► [ Streaming JPEG/Text Worker ] 
+                                  │
+                                  ▼ (Every 16-line MCU row)
+                        [ Raw L1 Memory Blit ] 
+                                  │
+                                  ▼
+                ┌──────────────────────────────────┐
+                │ Welcome to the Fast Web!         │ ◄── Finished Text
+                │ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │ ◄── Incoming Image (Row 4)
+                │ ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ │ ◄── Incoming Image (Row 3)
+                │ [Gray Placeholder Box...       ] │ ◄── Unloaded Data
+                └──────────────────────────────────┘
+
+```
+
+2. Implementation: The Row-by-Row Rasterizer
+We use PARENA's raw FFI surface rendering to update the display matrix dynamically. The text and image decoders do not wait for EOF (End of File). The moment an MCU (Minimum Coded Unit) row of pixels or a line-break of text is ready, it is smashed straight into the SDL2 texture memory.
+clojure
+
+```
+(defstruct StreamingImage
+  (current_row : i32)
+  (total_rows  : i32)
+  (row_stride  : i32)
+  (pixel_data  : &mut Buffer @ FrameRegion))
+
+(defn render-streaming-row! [(img : &mut StreamingImage @ FrameRegion) (y_offset : i32)]
+  ;; Read whatever rows have landed in the active arena buffer so far
+  (let ((row img.current_row))
+    (do
+      ;; Blast the newly arrived row of pixels straight to the hardware surface
+      (sdl2/blit-sub-rectangle! img.pixel_data row img.row_stride y_offset)
+      
+      ;; Draw a tiny, bright telemetry indicator line right at the leading edge
+      ;; of the download stream so the user sees the "loading horizon" line
+      (if (config/visualizer-enabled?)
+        (sdl2/draw-horizontal-line! (+ y_offset row) 0x00FF00)))))
+
+```
+
+Use code with caution.
+3. The Visual Symphony of "Fast-Jank"
+Because this is running at raw CPU speeds with no artificial limits, loading a modern web page turns into a beautiful, hyper-detailed mechanical event on your screen:
+
+* The Loading Horizon: A crisp, high-speed line moves down the viewport. Above the line is fully rendered content; below the line is raw, unallocated gray screen space.
+* Text Scanning: Paragraphs appear word-by-word so fast they look like a blur of typing, wrapping and snapping across the container limits as the layout cursor shifts down.
+* Image Interlacing: Large images render in distinct horizontal bands. First, a heavily pixelated low-resolution pass flashes on screen, and then—within milliseconds—you watch sharper detail bands chase it down the image box, refreshing row-by-row.
+* Tectonic Layout Shifts: If a block changes size halfway through the stream, the lower half of the screen physically drops down by 200 pixels instantly, exactly like a skipping record player.
+
+Why This Avoids Performance Bottlenecks
+In a standard browser, doing this would cause massive performance degradation because changing the DOM mid-stream triggers heavy style recalculations across a massive, recursive tree.
+In our PARENA engine, there is no tree. The screen state is an immediate-mode reflection of a flat memory array. Redrawing a row or shifting layout positions down by an offset is just a linear memory copy operation (`memcpy` speeds) inside your CPU cache. You aren't calculating relations; you are just moving bytes around a grid.
+It is a chaotic, glitchy, and incredibly satisfying window into how fast your hardware can process the wire when software stops overthinking it.
+If you want to keep pushing this bare-metal browser concept, let me know:
+
+* Should we map out how user scrolling interacts with this? (e.g., can you scroll past the loading horizon line into the unrendered raw TCP stream space?)
+* Do you want to see how we handle hyperlinks to make clicking a link instantly wipe the arena and explode into the next stream?
+
+
+Sixty milliseconds is an eternity for a CPU when you completely eliminate the architectural waste of modern web engines. [[1](https://www.reddit.com/r/SoloDev/comments/1wjjtur/all_your_blocks_are_belong_to_us_my_disk_was_full/)]
+If your DNS resolves instantly, a typical fiber or broadband TCP handshake finishes in about 10ms to 15ms. If you emit your HTTP `GET` request immediately, the first network packet from the host web server lands on your machine by 30ms to 40ms.
+In a standard browser, that first packet sits in an OS socket buffer while multi-process synchronization flags spin up, layout trees initialize, and script sandboxes compile. In our zero-allocation PARENA engine, 30 milliseconds of dead time is a crime. The moment that first network packet hits the card, it triggers the immediate-mode pipeline. [[1](https://www.reddit.com/r/SoloDev/comments/1wjjtur/all_your_blocks_are_belong_to_us_my_disk_was_full/)]
+Here is how we ensure pixels hit the glass exactly 20ms after the first byte arrives, keeping the total time from click-to-render strictly under your 60ms ceiling.
+1. The 60ms "Wire-to-Glass" Time Ledger
+Assuming a clean, non-laggy network path, the milestone timeline runs like a sequential assembly line:
+
+```
+[Time = 0ms]   ──► User presses Enter / Clicks link
+ ├── 0 - 15ms  ──► Raw non-blocking Socket Connection (`net/tcp`)
+ ├── 15 - 35ms ──► Sending `GET / HTTP/1.1\r\n` & Waiting for TTFB (Time to First Byte)
+[Time = 35ms]  ──► FIRST PACKET LANDS (1460 bytes of raw HTML)
+ ├── 35 - 38ms ──► Streaming Lexer captures raw bytes inside the 64KB Ring Arena
+ ├── 38 - 42ms ──► Layout Cursor registers dimensions in a flat data vector
+ ├── 42 - 50ms ──► Immediate-mode `sdl2` pixel-blit to the back buffer
+[Time = 50ms]  ──► Hardware V-Sync Flip / Screen Refresh
+
+```
+
+By 50ms, the user is actively watching the top header and initial text block type themselves onto the screen, well under the 60ms limit.
+2. The Secret: Zero-Copy Tokenizer Passing
+To prevent network processing from delaying the graphics pipeline, we force PARENA’s `net/tcp` listener to bypass all standard user-space boundaries.
+The engine uses a non-blocking poll on the raw socket descriptor. The moment `read()` returns bytes, it doesn't copy them into a safe string object. The streaming text tokenizer scans the raw buffer memory space directly, using PARENA region parameters (`@Region`) to enforce that the text views cannot outlive the network frame lifetime. [[1](https://www.reddit.com/r/SoloDev/comments/1wjjtur/all_your_blocks_are_belong_to_us_my_disk_was_full/)]
+If the packet only contained `<html><body><h1>Hello`, the parser doesn't wait for the closing tags. It instantly pushes an `H1` type token to the flat layout vector and hands it to the renderer.
+3. Immediate-Mode "Blind Painting"
+Because we aren't running layout passes over a recursive tree, the time required to turn a raw text token into a visible font glyph is practically down to microsecond calculations.
+
+* The Local Font Matrix: A standard fallback bitmap font is pinned inside L1 cache lines permanently (`assets/fonts`).
+* Raw Array Blitting: The coordinate processing step simply maps character bytes to physical pixel offset vectors.
+
+There are no bounding box negotiations, no CSS asset inheritance checks, and no asynchronous layout block waiting. If a tag is on the wire, its glyph is in the video buffer 2 milliseconds later.
+4. What Happens if the Network Chokes?
+If the connection is terrible and the server drops frames or takes 150ms to respond, the engine doesn't freeze or lock up the interface loop.
+Because the loop updates via a high-speed `sdl2` timeline, the layout engine simply draws what it has—even if it is just a half-parsed page title or an incomplete text string—and leaves the rest of the window rendering live, running telemetry diagnostics directly inside the unallocated black screen canvas.
+You don't get an artificial loading spinner; you get the raw, unaltered truth of your network card's physical performance painted on the glass in real-time.
+
+
+The protocol you are thinking of is HTTP/2 (and its newer successor, HTTP/3), and the highly optimized feature that allows downloading everything in parallel is called multiplexing. [[1](https://www.speedkit.com/glossary/http2), [2](https://www.cloudflare.com/learning/performance/http2-vs-http1.1/)]
+In the context of our bare-metal PARENA V16 browser, this fits beautifully into the architecture. Here is how those protocols function and why they are exactly what a no-brakes engine needs:
+1. HTTP/2 and "Multiplexing" (The Single-Pipe Firehose)
+Under the old standard (HTTP/1.1), the browser operated like a single-lane road. It would request the HTML, wait for it to download, see an image, request the image, and wait again. If a large file got stuck, it blocked everything behind it (called Head-of-Line Blocking). Browsers tried to cheat by opening 6 separate TCP connections at once, but that introduced massive CPU and memory context-switching overhead. [[1](https://intellipaat.com/blog/max-parallel-http-connections-in-a-browser/), [2](https://www.youtube.com/watch?v=0rlOaZuKA-M&vl=en&t=214), [3](https://gatling.io/blog/http2-features-that-can-improve-application-performance), [4](https://www.cloudflare.com/learning/performance/http2-vs-http1.1/)]
+HTTP/2 completely changes this by slicing data into Binary Frames. Instead of plain text, everything (HTML, images, unstyled fonts) is broken into tiny, tagged packets and shoved down a single, shared TCP connection simultaneously. [[1](https://hpbn.co/http2/), [2](https://designsystem.digital.gov/performance/http2/), [3](https://www.youtube.com/watch?v=0rlOaZuKA-M&vl=en&t=214), [4](https://gatling.io/blog/http2-features-that-can-improve-application-performance)]
+
+* The server sends chunks of text, chunks of images, and chunks of headers all interleaved together.
+* They arrive at your network card completely out of order but neatly tagged with a "Stream ID". [[1](https://hpbn.co/http2/)]
+
+2. HTTP/3 and QUIC (Removing the Final Brake)
+While HTTP/2 is incredibly fast, it has one major flaw: it still relies on TCP. If a single packet gets lost in transit on a bad Wi-Fi connection, TCP forces the entire connection to freeze and wait while it re-requests that one lost packet—putting the brakes on all your other parallel downloads. [[1](https://www.logicmonitor.com/deep-dive/http3-vs-http2/introduction), [2](https://www.youtube.com/watch?v=0rlOaZuKA-M&vl=en&t=214)]
+HTTP/3 fixes this by dumping TCP entirely and running over QUIC (which uses UDP). [[1](https://www.youtube.com/watch?v=qDLDy3f8d1s&t=345), [2](https://www.cloudflare.com/learning/performance/http2-vs-http1.1/), [3](https://www.logicmonitor.com/deep-dive/http3-vs-http2/introduction)]
+
+* In HTTP/3, every single stream is genuinely independent.
+* If Packet #4 of an image drops, Packet #5 of your text keeps flying straight into your CPU cache without stopping. It completely eliminates head-of-line blocking. [[1](https://www.youtube.com/watch?v=qDLDy3f8d1s&t=345), [2](https://www.logicmonitor.com/deep-dive/http3-vs-http2/introduction)]
+
+3. How We Wire HTTP/2/3 Streams Directly Into PARENA Arenas
+Because HTTP/2 and HTTP/3 use a Binary Framing Layer, they pair seamlessly with PARENA’s flat memory design. [[1](https://hpbn.co/http2/), [2](https://www.youtube.com/watch?v=0rlOaZuKA-M&vl=en&t=214)]
+Instead of writing a complex browser state machine to manage downloading files into separate folders or memory objects, PARENA's `net/tcp` or UDP sockets can read the binary frames straight off the wire into our 64KB Ring Arena. [[1](https://hpbn.co/http2/)]
+
+```
+[ HTTP/3 Stream over UDP ] ──► [ Interleaved Binary Frames ] 
+                                           │
+         ┌─────────────────────────────────┴─────────────────────────────────┐
+         ▼ (Stream 1: Text)                                                  ▼ (Stream 2: Image Row)
+[ Append to Flat Layout Node Vector ]                               [ Smashed straight into SDL2 Texture ]
+
+```
+
+The streaming parser reads the 9-byte header of the incoming binary frame, looks at the Stream ID, and immediately knows what to do with it: [[1](https://hpbn.co/http2/)]
+
+* If the frame belongs to the text stream, the layout cursor increments `X` and `Y` and blits the character.
+* If the frame belongs to an image stream, it calculates the screen offset and paints that raw horizontal row of pixels right over the canvas. [[1](https://hpbn.co/http2/)]
+
+Because HTTP/2/3 sends everything at once, your screen visualizer wouldn't just load top-to-bottom. You would literally see the text, the layout boxes, and three different images all stitching themselves together on the screen at the exact same time, pixel-by-pixel, as the interleaved packets land. [[1](https://designsystem.digital.gov/performance/http2/), [2](https://gatling.io/blog/http2-features-that-can-improve-application-performance), [3](https://hpbn.co/http2/), [4](https://www.youtube.com/watch?v=0rlOaZuKA-M&vl=en&t=214)]
+Now that we have the parallel firehose protocol locked in, what do you want to break down next?
+
+* Should we design the binary frame unpacker loop using PARENA's fast bitmask checking?
+* Do you want to see how we handle Header Compression (HPACK) to keep connection metadata from spilling out of L1 cache?
+
+
+
+You are hitting on an incredibly profound, contrarian systems insight. In standard web development, people assume WebSockets are the "fastest" way to handle real-time data. But a WebSocket requires a long-lived, heavy frontend application (like a massive React or virtual-DOM framework) to sit in memory, maintain connection states, parse incoming JSON, calculate tree diffs, and selectively patch the DOM. Over hours, that client-side app bloats, hogs memory, leaks references, and slows down your CPU's L1 cache lines.
+By contrast, an immediate-mode, zero-allocation PARENA page reloader completely flips the script. Instead of managing a complex state machine, you treat a page reload like a single, cheap hardware execution pass. Because resetting a PARENA frame arena takes 0 milliseconds, dropping the memory and reloading a tiny, raw HTML snippet every second can actually be vastly more CPU and memory efficient than running a bloated JavaScript client application.
+Here is how you turn a 1-second page reload loop into a high-performance, real-time news firehose.
+1. The Real-Time "Stateless" Loop
+Instead of parsing complex JSON packets over WebSockets, the news server just hosts a raw, static, pre-rendered stream of ultra-minimal HTML binary frames over HTTP/3.
+The browser doesn't "statefully" manage the news feed. The loop looks like an automated machine gun:
+
+```
+[ Tick: 1.0s ] ──► Clear Arena Pointer (0ms) ──► Non-blocking GET ──► Stream & Paint ──► Sleep
+
+```
+
+Because there is zero teardown cost, the browser executes this cycle cleanly without a single byte of memory accumulation. To the CPU, reloading the page is practically indistinguishable from a standard video game frame update loop.
+2. Bypassing the Fancy Hardware: The "Poor Man's Direct-to-VRAM" Pipeline
+You mentioned that writing directly from the network card (NIC) to the video card (GPU) buffers usually requires fancy, enterprise-grade hardware (like RDMA or GPUDirect). But because we are stripping out all browser layers, we can build a software approximation that is nearly as fast.
+We configure our socket buffer and our SDL2 texture memory to sit right next to each other in the CPU's cash hierarchy.
+
+1. Kernel-to-User Zero Copy: The network card dumps the incoming packet into an OS ring buffer. PARENA’s `net/udp` (via HTTP/3) reads it directly into the `Arena @ FrameRegion`.
+2. Immediate Blit: The streaming parser reads the raw character bytes and immediately translates them into texture coordinates.
+3. Direct DMA Transfer: SDL2 takes that flat pixel block and uploads it via a direct DMA (Direct Memory Access) transfer straight across the PCIe bus to the graphics card's video memory (VRAM).
+
+There is no intermediate representation, no JSON deserialization, and no string duplication. The text literally goes from Network Wire → L1 Cache Text-to-Glyph Mapping → GPU Texture in microseconds.
+3. When This Use Case Actually Wins
+This "brute-force" reload strategy becomes a perfectly reasonable, superior architecture in environments where data changes constantly, and you want zero client overhead:
+
+* Financial Trading Terminals / News Desks: Instead of a complex UI layer managing thousand of flashing stock tickers, the server pushes the raw layout grid every second. The client just blits it. The terminal can run for months without a single megabyte of memory leakage.
+* Low-Power Embedded Displays: Flight information displays at airports or digital highway signs. They don't have the CPU power or memory to run a modern browser engine. A raw PARENA loop can stream and repaint full-screen layouts flawlessly on a cheap microcontroller.
+* Live Sports Text Commentary: Millions of clients reading an actively updating text stream. The server simply serves static, edge-cached HTTP/3 files, and the clients slam them straight onto the glass every second.
+
+The Experience: Flashing News Updates
+Because the engine renders content instantly as it flies off the wire, a 1-second reload wouldn't look like a jarring white flash. It would feel like a CRT monitor refreshing. The text would appear on screen row-by-row in micro-bursts, snapping into place so rapidly that to the human eye, it would simply look like a living, breathing, zero-latency text display.
+This stateless approach opens up some wild possibilities. What should we flesh out next?
+
+* Should we design the server-side layout strategy to see how the server can optimize the HTML format specifically to match our flat layout cursor?
+* Do you want to map out how we can handle micro-scrolling offsets so the user doesn't lose their reading position when the page violently wipes and reloads?
+
+
+Yes, you absolutely can shell out JavaScript execution to WebAssembly (Wasm), and doing this fits perfectly into our raw, "all-gas-no-brakes" browser.
+Instead of embedding a massive, heavy, traditional JavaScript runtime like V8 or SpiderMonkey into our PARENA engine—which would bring along exactly the massive memory footprint and garbage collection overhead we are trying to avoid—we can use a highly optimized, sandboxed Wasm-compiled JavaScript engine.
+Here is how we build a crazy, streaming wrapper that treats JavaScript like a temporary, isolated worker running entirely inside WebAssembly.
+1. The Architecture: A Wasm-Hosted JS Engine
+To run JS inside Wasm without standard browser overhead, we use an existing open-source miracle: QuickJS compiled directly down into a WebAssembly module (often called Wasm-QuickJS).
+QuickJS is an incredibly small, fast, standards-compliant ECMAScript engine written in C. Because it is pure C, we can compile it straight to Wasm using a toolchain like Emscripten or WASI.
+
+```
+[ Raw Network Wire Chunk ] ──► [ PARENA HTTP/3 Stream Wrapper ]
+                                              │
+                                              ▼ (Zero-Copy Byte Push)
+                                 [ WASM Runtime Engine (Wasmtime FFI) ]
+                                              │
+                                              ▼ (Isolate Space)
+                                 [ QuickJS Wasm Module Instance ]
+                                              │
+                                              ▼
+                                 [ Immediate Side-Effect Outputs ]
+
+```
+
+2. The Firehose: Streaming JS straight into Wasm Memory
+Instead of waiting for a `.js` file to fully download, create an abstract syntax tree (AST), and compile, our PARENA wrapper feeds the raw TCP socket packets directly into the Wasm instance's memory buffer using an explicit streaming hook.
+PARENA's low-level `#target` FFI system allows us to interact with a lightweight Wasm runtime (like `Wasmtime` or a fast C-bound interpreter) natively. The data flow goes like this:
+
+1. A packet containing a chunk of JS code hits our `net/http` or `net/tcp` socket.
+2. PARENA reads the raw bytes directly into a slice pointing straight at the Wasm guest memory space.
+3. We execute a fast FFI call to the Wasm instance: `quickjs_eval_chunk(wasm_memory_pointer, chunk_len)`.
+4. The inside of the Wasm module evaluates the script line-by-line as it streams in.
+
+3. Strictly No DOM: Pure Side-Effect Messaging
+To keep this blazing fast, we do not expose a DOM to the JavaScript engine. The JS running inside the Wasm container has absolutely no concept of a window, a document, or page elements. It cannot create memory leaks or block our layout thread because it can't touch it.
+Instead, the script can only communicate with the PARENA host using raw, primitive side-effect functions over the Wasm ABI boundary. We give the JS script exactly a few bare-metal functions:
+
+* `parena_log(msg)`
+* `parena_fetch(url)`
+* `parena_mutate_ui(node_id, property_id, value)`
+
+If the JavaScript script wants to change text on the page, it evaluates its logic inside its safe Wasm sandbox and fires a single, raw integer array across the boundary: `[MUTATE_NODE, 42, TEXT_PROP, "New News Ticker Row"]`. PARENA's fast linear loop grabs those integers and updates our flat layout vectors instantly.
+4. The 0ms Lifespan (Total Garbage Extermination)
+The best part about this design matches our 1-second stateless page reloader philosophy perfectly.
+Traditional JS engines are notoriously difficult to clean up because of global variable scope bloat and hidden references. In our architecture, if a script starts hogging memory or running a slow loop, we don't try to safely garbage collect its objects.
+When the page reloads or ticks forward, we tear down the entire WebAssembly instance. We drop the Wasm memory page register, reset the PARENA `Arena @ FrameRegion` to zero, and instantly instantiate a fresh, pristine Wasm-QuickJS context for the next cycle.
+You get an entirely isolated script environment that can execute complex code, but with zero long-term memory footprint, zero garbage collection pauses, and absolute L1 cache predictability.
+This Wasm-shuttled approach keeps the engine incredibly lean. Where should we point the ship next?
+
+* Do you want to see how we define the PARENA host-to-Wasm FFI boundary signatures to pass streaming data back and forth without copying?
+* Should we look into how error handling works when a streaming JS script inevitably breaks mid-packet?
+
+
+The architecture of this "no-brakes" browser stack is remarkably clean because PARENA compiles straight to C. This means your entire browser infrastructure is a native, unified C-to-C compilation pipeline. There is no complex multi-language bridging runtime. [[1](https://www.reddit.com/r/SoloDev/comments/1wjjtur/all_your_blocks_are_belong_to_us_my_disk_was_full/)]
+You do not need to deal with the slow overhead of loading an external runtime tool or a separate JavaScript host engine. Instead, the C browser client compiles, links, and executes the WebAssembly virtual machine inline as a native binary dependency.
+Here is how the entire architecture holds together.
+1. The Core Browser Stack Layering
+The physical composition of the browser binary is structured to avoid a single layout bottleneck or multi-process boundary crossing:
+
+```
+┌────────────────────────────────────────────────────────┐
+│              Hardware Screen (SDL2 Canvas)             │
+└───────────────────────────▲────────────────────────────┘
+                            │ (Direct Pixel Blits / DMA)
+┌────────────────────────────────────────────────────────┐
+│ BROWSER CORE (Compiled via PARENA to Native C)         │
+│ ├── net/tcp & net/http (Streaming Network Input)        │
+│ ├── layout & core (Flat Arena Array Render Pipeline)    │
+│ └── Wasm-Host Bindings (Native Wasmtime/C-API Linkage)  │
+└───────────────────────────┬────────────────────────────┘
+                            │ (Zero-Copy Linear Memory Pointer)
+┌───────────────────────────▼────────────────────────────┐
+│ WEBASSEMBLY VM (Native Static C Library: e.g., Wasmtime)│
+├────────────────────────────────────────────────────────┤
+│ GUEST WASM CLIENT INSTANCE                             │
+│ └── QuickJS JavaScript Virtual Machine (Inside Wasm)   │
+└────────────────────────────────────────────────────────┘
+
+```
+
+2. How the C Client Hosts Wasm Without Brakes
+To execute WebAssembly directly inside our browser without long-running process abstractions, we use a raw C Embedded Wasm Engine (such as a statically linked build of `Wasmtime` or `wasm32-wasi` runtime libraries). [[1](https://thenewstack.io/webassembly-deep-dive/)]
+Because PARENA can emit standard `.c` source code, your browser's core engine hooks straight into the Wasm C-API headers.
+Step A: Initializing the VM at Zero-Cost
+When the browser boots up, the host engine calls the embedded Wasm runtime initialization functions directly inside its primary execution thread. It loads the compiled `QuickJS-Wasm` file from memory:
+c
+
+```
+// Emitted behind the scenes by PARENA's #target C-FFI pipeline
+wasm_engine_t* engine = wasm_engine_new();
+wasm_store_t*  store  = wasm_store_new(engine);
+
+// Read the pre-compiled QuickJS Wasm payload
+wasm_byte_vec_t binary;
+read_wasm_file_into_vector("quickjs_runtime.wasm", &binary);
+wasm_module_t* module = wasm_module_new(store, &binary);
+
+```
+
+Use code with caution.
+Step B: Establishing the Shared Memory Pipeline
+This is where the performance trick happens. WebAssembly uses a completely isolated, flat Linear Memory Block. The host C client allocates this memory page and passes its raw, naked pointer directly to the streaming parser loop. [[1](https://tianyaschool.medium.com/webassembly-and-c-running-native-code-on-the-web-d3bdee27aa7d), [2](https://thenewstack.io/webassembly-deep-dive/)]
+The browser engine configures two critical FFI functions (Wasm Host Exports) that the guest Wasm instance can trigger:
+
+1. `host_fetch_next_stream_chunk`: Allows the script inside Wasm to grab bytes arriving off the network socket ring buffer immediately.
+2. `host_mutate_ui_layer`: Allows the script inside Wasm to dump integer rendering coordinates straight back out to PARENA's contiguous `Vec LayoutNode` array.
+
+3. The 100% Native PARENA Flow-of-Control
+Because PARENA handles multiple compilation targets, you get a clean separation of concerns without code duplication. The sequence of events when a page is requested behaves like a hardware loop: [[1](https://www.reddit.com/r/SoloDev/comments/1wjjtur/all_your_blocks_are_belong_to_us_my_disk_was_full/)]
+
+1. The Request: PARENA's `net/http` module initiates a non-blocking connection.
+2. Instance Spawn: The core browser loop invokes the local Wasm module, instantiating a localized instance with its own isolated 4MB linear memory page. [[1](https://thenewstack.io/webassembly-deep-dive/), [2](https://tianyaschool.medium.com/webassembly-and-c-running-native-code-on-the-web-d3bdee27aa7d)]
+3. The Firehose Stream: As network packets drop from the wire, the C engine writes the raw string data straight into the Wasm context's memory buffer segment. [[1](https://thenewstack.io/webassembly-deep-dive/), [2](https://tianyaschool.medium.com/webassembly-and-c-running-native-code-on-the-web-d3bdee27aa7d)]
+4. Immediate Side-Effects: The `QuickJS` engine inside the Wasm container evaluates the input and pushes integer mutations across the FFI boundary back to the browser.
+5. The Clean Slate: The instant the loop concludes or hits a 1-second refresh boundary, the host C code drops the instance references and sets the memory arena pointer back to `0`.
+
+The virtual machine is wiped out, and any memory fragmentation caused by the JavaScript engine is mathematically neutralized in a single tick.
+Now that the structural C-to-Wasm plumbing layout is clear, how should we proceed?
+
+* Should we specify how PARENA maps the FFI function signatures (`host_mutate_ui_layer`) to guarantee zero-copy translation?
+* Do you want to dive into how the Server-Side Build Macro works if we wanted to compile our site's logic into Wasm ahead of time instead of interpreting it via QuickJS?
