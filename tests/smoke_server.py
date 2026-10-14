@@ -4,13 +4,16 @@
   smoke_server.py PORT ROOT [CERT KEY] [--redirect-to URL]
 
 Serves files under ROOT. /old answers 301 -> /index.html (relative) and, with --redirect-to, /hop answers
-301 -> that absolute URL. With CERT and KEY it speaks TLS. Prints nothing; killed by the test.
+301 -> that absolute URL. /hang sends headers and a few bytes, then holds the connection open (a page that
+is still streaming). /trunc promises Content-Length: 100000, sends a few bytes and drops the connection
+(over TLS: without a close_notify). With CERT and KEY it speaks TLS. Prints nothing; killed by the test.
 """
 import http.server
 import os
 import socketserver
 import ssl
 import sys
+import time
 
 
 def main():
@@ -32,6 +35,20 @@ def main():
                 self.send_response(301)
                 self.send_header("Location", "/index.html")
                 self.end_headers()
+                return
+            if self.path == "/hang":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<html><body><h1>still streaming</h1>")
+                self.wfile.flush()
+                time.sleep(60)
+                return
+            if self.path == "/trunc":
+                self.send_response(200)
+                self.send_header("Content-Length", "100000")
+                self.end_headers()
+                self.wfile.write(b"<html><body><h1>cut short</h1>")
                 return
             if self.path == "/hop" and redirect_to:
                 self.send_response(301)

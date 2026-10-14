@@ -11,7 +11,19 @@
 - Smoke suite extended (trusted, large multi-record body, untrusted cert, wrong hostname, unreadable bundle,
   http->https redirect); also run against the cross-compiled exe under Wine (new non-gating `windows-smoke` CI job).
 - Windows packaging compiles the pinned mbedTLS with mingw (`scripts/fetch_mbedtls.sh`, sha256-verified).
-- PARENA: `stream-connect-tls` & friends @aa05cc9 (`make test-net-stream`, `make test-net-stream-tls`).
+- PARENA: `stream-connect-tls` & friends @cd91575 (`make test-net-stream`, `make test-net-stream-tls`).
+- Hardening from an adversarial multi-lens review (each item reproduced before it was fixed):
+  - navigating away from a page that is still streaming now closes that socket / TLS session (it leaked
+    one fd per abandoned navigation, and left the TLS session running);
+  - TLS handles are tagged + generational, so a closed/superseded handle can no longer close, read or
+    write an unrelated descriptor that reused its number;
+  - the TLS handshake and TCP connect run against a monotonic wall-clock deadline (a peer dripping one
+    byte per 50 ms used to hold the window frozen indefinitely) and survive EINTR;
+  - `cacert.pem` is no longer picked up from the current directory (only beside the executable);
+  - a TLS stream that ends without close_notify is flagged in the status bar and log as possibly truncated;
+  - `FD_SET` range guards in the runtime.
+  Smoke suite: +3 scenarios (navigate-away leak check via the new `--smoke-nav="A B"` self-test hook, TLS
+  clean close not flagged, TLS truncation flagged); PARENA `test-net-stream-tls` +8 cases.
 
 ## 2026-10-14 (v1)
 - Live HTTP: `pellegrino http://...` / `:` address bar; streaming paint, header parse, redirects, title/script/

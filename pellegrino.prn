@@ -234,6 +234,8 @@
       (string/substring url 0 p dest))))
 
 ;; ---- navigation ----
+;; Navigating away must never leak the socket (or leave a TLS session running) of the page being left:
+;; every new navigation first closes whatever live stream slot 4 still holds.
 ;; NOTE (VS0 emitter): `do` only works as a function/let body -- inside an if/cond arm that is itself a
 ;; value it is emitted as a ternary and breaks. So multi-effect arms are small helper functions.
 (defn nav-fail [(code : I32) (msg : String @ Region)] : I32
@@ -307,8 +309,20 @@
     ((= (has-prefix url "http://") 1) (open-conn url dest))
     (true (nav-fail 3 "bad url"))))
 
+(defn close-open-conn [(fd : I32) (dest : Arena @ Region)] : I32
+  (do (pg-log-n "navigation closes live stream; fd=" fd dest)
+      (stream-close fd)
+      (slot-set 4 -1)
+      0))
+
+(defn drop-conn [(dest : Arena @ Region)] : I32
+  (if (>= (slot-get 4) 0)
+    (close-open-conn (slot-get 4) dest)
+    0))
+
 (defn start-nav [(url : String @ Region) (dest : Arena @ Region)] : I32
   (do
+    (drop-conn dest)
     (stream-reset)
     (cururl-set url)
     (slot-set 0 0)
@@ -316,6 +330,7 @@
     (slot-set 2 1)
     (slot-set 4 -1)
     (slot-set 5 -1)
+    (slot-set 12 0)
     (slot-set 10 (+ (slot-get 10) 1))
     (pg-log (string/concat "navigate " url dest))
     (nav-dispatch url dest)))
@@ -354,8 +369,7 @@
 
 (defn follow [(next : String @ Region) (dest : Arena @ Region)] : I32
   (do (slot-set 7 (+ (slot-get 7) 1))
-      (stream-close (slot-get 4))
-      (start-nav next dest)))
+      (start-nav next dest))) ; start-nav closes the stream being left
 
 (defn redirect [(buf : String @ Region) (hend : I32) (dest : Arena @ Region)] : I32
   (let [a (find-location buf hend)]
@@ -392,18 +406,26 @@
         0
         (got-headers he dest)))))
 
-(defn close-conn [(fd : I32) (dest : Arena @ Region)] : I32
+;; slot 12 = 1: the TLS stream ended without a close_notify (TCP EOF / reset), so the body may be
+;; cut short; shown in the status bar and the log rather than passed off as a complete page
+(defn note-unclean [] : I32
+  (do (slot-set 12 1)
+      (pg-log "tls: stream ended WITHOUT close_notify -- page may be truncated")
+      0))
+
+(defn close-conn [(fd : I32) (r : I32) (dest : Arena @ Region)] : I32
   (do (stream-close fd)
       (slot-set 4 -1)
       (slot-set 2 1)
+      (if (= r -3) (note-unclean) 0)
       (pg-log-n "stream closed; bytes=" (stream-len) dest)
       0))
 
 ;; connection ended (EOF or error): look for headers once more, then close if no redirect replaced it
-(defn net-eof [(fd : I32) (gen : I32) (dest : Arena @ Region)] : I32
+(defn net-eof [(fd : I32) (gen : I32) (r : I32) (dest : Arena @ Region)] : I32
   (let [c (check-headers dest)]
     (if (= (slot-get 10) gen)
-      (close-conn fd dest)
+      (close-conn fd r dest)
       0)))
 
 (defn mark-dirty-if [(r : I32)] : I32
@@ -423,7 +445,7 @@
             (cond
               ((> r 0) (recur (+ k 1)))
               ((= r 0) (check-headers dest))
-              (true (net-eof fd gen dest)))))))))
+              (true (net-eof fd gen r dest)))))))))
 
 (defn cur-page [(page : String @ Region)] : String
   (let [src (slot-get 6)]
@@ -467,13 +489,16 @@
         0))
     0))
 
+(defn banner [] : String
+  (cond
+    ((= (slot-get 12) 1) "PELLEGRINO v1 [https: ended without close_notify, may be truncated]   :=URL  esc=quit   ")
+    ((and (= (slot-get 6) 1) (= (url-https? (cururl-get)) 1)) "PELLEGRINO v1 [https]   :=go to URL   esc=quit   ")
+    (true "PELLEGRINO v1   :=go to URL   esc=quit   ")))
+
 (defn status-text [(dest : Arena @ Region)] : String
   (if (= (slot-get 3) 1)
     (string/concat (string/concat "> " (linebuf-get) dest) "_" dest)
-    (string/concat (if (and (= (slot-get 6) 1) (= (url-https? (cururl-get)) 1))
-                     "PELLEGRINO v1 [https]   :=go to URL   esc=quit   "
-                     "PELLEGRINO v1   :=go to URL   esc=quit   ")
-                   (cururl-get) dest)))
+    (string/concat (banner) (cururl-get) dest)))
 
 (defn draw-status [(ren : I32) (win-w : I32) (win-h : I32)] : I32
   (with-arena [fr :region/scratch 4096]
@@ -581,6 +606,17 @@
     (redraw ren page n cols rows win-w win-h)
     (sdl2_delay_raw 8)))
 
+;; --smoke-nav=A B: after frame 20 of a self-exiting run, submit B through the same path as typing it in
+;; the address bar (B was pre-filled into the line buffer) while A may still be streaming
+(defn hop [(dest : Arena @ Region)] : I32
+  (do (pg-log "smoke-nav: address-bar navigation")
+      (go-url dest)))
+
+(defn smoke-hop [(frames : I32) (limit : I32) (dest : Arena @ Region)] : I32
+  (if (and (> limit 0) (= frames 20) (> (linebuf-len) 0))
+    (hop dest)
+    0))
+
 (defn frame-loop [(ren : I32) (page : String @ Region) (n : I32) (win-w : I32) (win-h : I32)
                   (limit : I32) (dest : Arena @ Region)] : I32
   (let [cols (/ (- win-w 24) 12)
@@ -590,7 +626,8 @@
         (do (pg-log-n "smoke limit reached; frames=" frames dest) frames)
         (if (= (handle-events dest) 1)
           (do (pg-log-n "quit; frames=" frames dest) frames)
-          (let [p1 (pump-net dest)
+          (let [p0 (smoke-hop frames limit dest)
+                p1 (pump-net dest)
                 p2 (pump-static n)
                 p3 (present-or-wait ren page n cols rows win-w win-h)]
             (recur (+ frames 1))))))))
@@ -601,7 +638,14 @@
       (pg-log "pellegrino v1 start")
       (let [smoke (string/str-eq? arg "--smoke")
             surl (has-prefix arg "--smoke-url=")
-            url (if (= surl 1) (string/substring arg 12 (string/length arg) &mut a) arg)
+            snav (has-prefix arg "--smoke-nav=")
+            sp (if (= snav 1) (find-char arg 32 12) -1)
+            url (if (= surl 1)
+                  (string/substring arg 12 (string/length arg) &mut a)
+                  (if (and (= snav 1) (> sp 0)) (string/substring arg 12 sp &mut a) arg))
+            pre (if (and (= snav 1) (> sp 0))
+                  (linebuf-append (string/substring arg (+ sp 1) (string/length arg) &mut a))
+                  0)
             isurl (has-prefix url "http")
             fd (if (and (> (string/length url) 0) (not smoke) (= isurl 0)) (raw-open url 0) -1)
             page (if (>= fd 0) (raw-read-all fd &mut a) (embedded-page))
@@ -622,7 +666,7 @@
                     (do (pg-log "window+renderer up (borderless 1280x720)")
                         (start-text-input)
                         (if (= isurl 1) (start-nav url &mut a) 0)
-                        (frame-loop ren page n 1280 720 (if (or smoke (= surl 1)) 120 0) &mut a)
+                        (frame-loop ren page n 1280 720 (if (or smoke (= surl 1) (= snav 1)) 120 0) &mut a)
                         (sdl2-raw-destroy-renderer ren)
                         (sdl2-raw-destroy-window win)
                         (pg-log "clean exit")

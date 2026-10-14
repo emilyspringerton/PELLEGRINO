@@ -26,7 +26,9 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   A bad certificate shows a "certificate rejected" page with the reason and renders nothing. mbedTLS
   allocates from one static buffer (2 MiB, BSS), so the no-malloc claim holds for TLS too. Trust roots:
   `SSL_CERT_FILE` if set (unreadable = fail closed, no fallback), else the system bundle, else the
-  `cacert.pem` shipped next to the executable (the only store on Windows).
+  `cacert.pem` shipped next to the executable (the only store on Windows) — never the current directory.
+  A TLS stream that ends without a close_notify (possible truncation) is flagged in the status bar and the
+  log instead of being presented as a complete page; navigating away closes the stream being left.
 - Source = live URL, embedded page (default), or a file path: `pellegrino path/to/page.html`.
 - Keys: `:` address bar, Up/Down/Home/End or mouse wheel to scroll, Esc/q to quit.
 - **No malloc**: the PARENA runtime is built with `-DPARENA_NO_MALLOC` (static pool); the C host is `main()`
@@ -36,8 +38,8 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   flashes and closes.
 - Bazel build (`bazelisk build //:pellegrino`), headless smoke test under Xvfb (`bazelisk test //...`):
   embedded page, live HTTP, redirect, HTTPS with a trusted / untrusted / wrong-hostname certificate,
-  an unreadable bundle, and http->https redirect. The same suite also passes against the cross-compiled
-  `pellegrino.exe` under Wine.
+  an unreadable bundle, http->https redirect, navigating away mid-stream (no socket/TLS leak), TLS clean
+  close vs truncation. The same suite also passes against the cross-compiled `pellegrino.exe` under Wine.
 - CI from day 1: every green push to `main` auto-tags a MINOR version and publishes a GitHub Release with
   a Linux bundle (binary + bundled libSDL2 + `cacert.pem` + `RUN.sh`) and a flat Windows zip
   (`pellegrino.exe` + `SDL2.dll` + `cacert.pem` + `RUN.bat`), plus a deterministic CONSTRUCT source snapshot.
@@ -57,7 +59,8 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
 ## Run
 
 Download the latest release, unzip, and run `RUN.bat` (Windows) or `./RUN.sh` (Linux). Pass a URL as the first argument, or
-`--smoke` / `--smoke-url=https://...` for a self-exiting run (used by the CI smoke test). Check `pellegrino.log` next to the
+`--smoke` / `--smoke-url=https://...` / `--smoke-nav="A B"` (load A, then submit B through the address-bar
+path) for a self-exiting run (used by the CI smoke test). Check `pellegrino.log` next to the
 executable. `SSL_CERT_FILE=/path/to/bundle.pem` overrides the trust roots (e.g. for a private CA).
 
 ## Build

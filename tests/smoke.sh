@@ -9,7 +9,9 @@
 #   7. HTTPS, wrong hostname           refused (chain is trusted, name is not)
 #   8. SSL_CERT_FILE unreadable        fails closed (no silent fallback)
 #   9. HTTP -> HTTPS redirect          followed into TLS
-#  10. no unverified fallback          the untrusted run never reaches an HTTP status line
+#  10. navigate away mid-stream        the live stream being left is closed (no fd / TLS session leak)
+#  11. TLS clean close                 an authenticated close_notify is not flagged
+#  12. TLS truncation                  a stream cut without close_notify is flagged, never shown as complete
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # PELLEGRINO_BIN overrides the binary for ad-hoc runs; under `bazel test` it comes from the runfiles.
@@ -105,5 +107,31 @@ serve "$HPORT" www --redirect-to "https://localhost:$TLSPORT/index.html"
 wait_port "$HPORT"
 SSL_CERT_FILE="$WORK/good.pem" run "--smoke-url=http://127.0.0.1:$HPORT/hop"
 for n in "http status=301" "navigate https://localhost:$TLSPORT/index.html" "tls TLSv1" "http status=200" "clean exit"; do need "$n"; done
+
+echo "== 10. navigating away from a live stream closes it"
+run "--smoke-nav=http://127.0.0.1:$PORT/hang http://127.0.0.1:$PORT/index.html"
+for n in "smoke-nav: address-bar navigation" "navigation closes live stream" "http status=200" "clean exit"; do need "$n"; done
+# the second connection reuses the first one's descriptor number only if the first was really closed
+NFD=$(grep -o "connected; fd=[0-9]*" pellegrino.log | sort -u | wc -l)
+[ "$NFD" -eq 1 ] || { echo "FAIL: navigation leaked the previous socket ($NFD distinct fds)"; cat pellegrino.log; exit 1; }
+SSL_CERT_FILE="$WORK/good.pem" run "--smoke-nav=https://localhost:$TLSPORT/hang https://localhost:$TLSPORT/index.html"
+for n in "navigation closes live stream" "stream closed; bytes=" "clean exit"; do need "$n"; done
+absent "tls FAILED"
+[ "$(grep -c 'http status=200' pellegrino.log)" -eq 2 ] || { echo "FAIL: expected both pages to load"; cat pellegrino.log; exit 1; }
+
+echo "== 11. TLS stream that ends with close_notify is not flagged"
+CPORT=$(free_port)
+openssl s_server -accept "$CPORT" -cert good.pem -key good.key -www -quiet >/dev/null 2>&1 &
+PIDS+=($!)
+wait_port "$CPORT"
+SSL_CERT_FILE="$WORK/good.pem" run "--smoke-url=https://localhost:$CPORT/"
+for n in "http status=200" "stream closed; bytes=" "clean exit"; do need "$n"; done
+absent "WITHOUT close_notify"
+
+echo "== 12. TLS stream cut without close_notify is flagged"
+SSL_CERT_FILE="$WORK/good.pem" run "--smoke-url=https://localhost:$TLSPORT/trunc"
+for n in "http status=200" "tls: stream ended WITHOUT close_notify" "stream closed; bytes=" "clean exit"; do need "$n"; done
+run "--smoke-url=http://127.0.0.1:$PORT/trunc"
+absent "WITHOUT close_notify"
 
 echo "smoke OK"
