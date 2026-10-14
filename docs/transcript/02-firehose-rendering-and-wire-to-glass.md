@@ -198,7 +198,7 @@ If you want to keep pushing this bare-metal browser concept, let me know:
 
 ## Turn 6 — You
 
-*(prompt not captured)*
+> in most circumstances we should be able to get SOMETHING on the page by 60 ms after the request is made; unless the dns or something is fucked up obviously
 
 ### Gemini
 
