@@ -13,6 +13,7 @@ parena_compile_c(
         "@parena//stdlib:array.prn",
         "@parena//stdlib:io.prn",
         "@parena//stdlib:sdl2.prn",
+        "@parena//stdlib:net/stream.prn",
     ],
 )
 
@@ -30,8 +31,8 @@ cc_binary(
     deps = ["@parena//runtime:parena_runtime"],
 )
 
-# Headless smoke test: opens the borderless window under Xvfb, streams the embedded page, exits
-# cleanly, and checks the real text log file the run wrote.
+# Headless smoke tests: open the borderless window under Xvfb, stream the embedded page AND a live
+# HTTP page from a local server, exit cleanly, and check the real text log file the run wrote.
 sh_test(
     name = "smoke",
     srcs = ["tests/smoke.sh"],

@@ -2,6 +2,9 @@
 ;; Pure PARENA; the C harness (pellegrino_host.c) only owns main(), the static memory pool and
 ;; log redirection. No malloc anywhere in this file or the harness (built -DPARENA_NO_MALLOC).
 ;;
+
+;; v1: live HTTP. `pellegrino http://host/path` (or `:` then a URL in the window) opens a TCP
+;; connection (net/stream, winsock on Windows), sends HTTP/1.0, and paints the body as bytes land.
 ;; v0 scope (agile, working software first): bytes "pour onto the glass" from a source (embedded
 ;; page, or a file path argument), tags are stripped, layout is a drifting cursor over a cell grid,
 ;; glyphs are drawn from an embedded 5x8 bitmap font via filled rects. Newly arrived bytes are
@@ -11,6 +14,7 @@
 
 (module pellegrino)
 (import string)
+(import net/stream)
 (export pellegrino-run)
 
 ;; 5x8 font, ASCII 32..126, 8 rows x 1 byte each = 16 hex chars per glyph (tools/gen_font.py).
@@ -78,27 +82,43 @@
 
 ;; Drifting-cursor layout + draw in one pass over the first `revealed` bytes.
 ;; Returns the row index just past the last drawn row (for the loading horizon).
+;; <title> <script> <style>: their content is not page text; skipped until the closing tag
+(defn skip-elem? [(page : String @ Region) (i : I32)] : I32
+  (if (= (match-at page i "<title") 1)
+    1
+    (if (= (match-at page i "<script") 1)
+      1
+      (if (= (match-at page i "<style") 1) 1 0))))
+
 (defn draw-cell [(ren : I32) (c : I32) (i : I32) (revealed : I32) (vis : Bool) (px : I32) (py : I32)] : I32
   (if vis
-    (do (if (< (- revealed i) 160)
+    (do (if (and (= (slot-get 11) 1) (< (- revealed i) 160))
           (sdl2-raw-set-draw-color ren 255 176 64 255)
           (sdl2-raw-set-draw-color ren 216 216 216 255))
         (draw-glyph ren c px py 2))
     0))
 
-(defn draw-page [(ren : I32) (page : String @ Region) (revealed : I32) (scroll : I32)
+(defn draw-page [(ren : I32) (page : String @ Region) (start : I32) (revealed : I32) (scroll : I32)
                  (cols : I32) (rows : I32) (x0 : I32) (y0 : I32)] : I32
-  (loop [i 0 col 0 row 0 tag 0]
+  (loop [i start col 0 row 0 tag 0]
     (if (>= i revealed)
       row
       (let [c (string/char-at page i)]
         (cond
           ((= tag 1)
            (recur (+ i 1) col row (if (= c 62) 0 1)))
+          ((= tag 4)
+           (recur (+ i 1) col row (if (= c 62) 2 4)))
+          ((= tag 2)
+           (if (and (= c 60) (= (string/char-at page (+ i 1)) 47))
+             (recur (+ i 1) col row 1)
+             (recur (+ i 1) col row 2)))
           ((= c 60)
-           (if (breaks? page i)
-             (recur (+ i 1) 0 (if (> col 0) (+ row 1) row) 1)
-             (recur (+ i 1) col row 1)))
+           (if (= (skip-elem? page i) 1)
+             (recur (+ i 1) col row 4)
+             (if (breaks? page i)
+               (recur (+ i 1) 0 (if (> col 0) (+ row 1) row) 1)
+               (recur (+ i 1) col row 1))))
           ((= c 10) (recur (+ i 1) 0 (+ row 1) 0))
           ((= c 13) (recur (+ i 1) col row 0))
           (true
@@ -109,80 +129,430 @@
              (do (draw-cell ren c i revealed vis (+ x0 (* cc 12)) (+ y0 (* (- r scroll) 18)))
                  (recur (+ i 1) (+ cc 1) r 0)))))))))
 
+;; ===================== navigation, state (slots) and the frame loop =====================
+;; slot 0 revealed (src 0 only)  1 scroll  2 dirty  3 mode (0 view, 1 typing a URL)
+;; slot 4 socket fd (-1 none)    5 body start in stream buf (-1 until headers seen)   10 navigation generation
+;; slot 6 src (0 file/embedded page, 1 live stream, 3 error page)   7 redirects   8 error code
 (defn embedded-page [] : String
-  "<h1>PELLEGRINO v0</h1>
+  "<h1>PELLEGRINO v1</h1>
 <p>all gas; no brakes; powered by PARENA.</p>
 <p>CLEAN BUILDS FIRST.</p>
-<p>This text is pouring onto the glass byte by byte: tags are stripped, the cursor drifts, and the newest bytes glow amber.</p>
-<p>Keys: Up/Down/Home/End or mouse wheel to scroll, Esc or q to quit.</p>
-<p>Pass a file path as the first argument to stream your own page.</p>
+<p>Press : and type a URL (http://...) then Enter. Bytes are painted as they land off the wire; the newest glow amber.</p>
+<p>Keys: Up/Down/Home/End or mouse wheel scroll, : address bar, Esc/q quit.</p>
+<p>Start with a URL or a file path as the first argument.</p>
 <p>With love, <4 America.</p>
 ")
 
-(defn render-frame [(ren : I32) (page : String @ Region) (nrev : I32) (n : I32) (scroll : I32)
-                    (cols : I32) (rows : I32) (win-w : I32) (win-h : I32)] : I32
-  (let [bg (sdl2-raw-set-draw-color ren 18 18 18 255)
-        cl (sdl2-raw-render-clear ren)
-        last-row (draw-page ren page nrev scroll cols rows 12 12)
-        c1 (sdl2-raw-set-draw-color ren 214 137 16 255)
-        hz (if (< nrev n)
-             (sdl2-raw-render-fill-rect ren 0 (+ (+ 12 (* (- last-row scroll) 18)) 20) win-w 2)
-             0)
-        c2 (sdl2-raw-set-draw-color ren 60 60 60 255)
-        ln (sdl2-raw-render-fill-rect ren 0 (- win-h 30) win-w 1)
-        c3 (sdl2-raw-set-draw-color ren 166 68 14 255)
-        tx (draw-str ren "PELLEGRINO v0  esc=quit  up/down=scroll" 12 (- win-h 24))]
-    (do (sdl2-raw-render-present ren) 0)))
+(defn error-page [(code : I32)] : String
+  (cond
+    ((= code 1) "<h1>could not connect</h1>\n<p>DNS or TCP connect failed (5 s timeout). Check the URL, then press : and type another.</p>\n")
+    ((= code 2) "<h1>https is not built yet</h1>\n<p>PELLEGRINO speaks plain http:// today. TLS is the next rung of the protocol ladder (NORTHSTAR).</p>\n<p>Press : and type an http:// URL.</p>\n")
+    ((= code 3) "<h1>bad URL</h1>\n<p>Use http://host/path</p>\n")
+    ((= code 4) "<h1>too many redirects</h1>\n")
+    (true "<h1>error</h1>\n")))
+
+;; 1 if s starts with p
+(defn has-prefix [(s : String @ Region) (p : String @ Region)] : I32
+  (let [pn (string/length p)]
+    (if (< (string/length s) pn)
+      0
+      (loop [i 0]
+        (if (>= i pn)
+          1
+          (if (= (string/char-at s i) (string/char-at p i))
+            (recur (+ i 1))
+            0))))))
+
+;; 1 if buf has pattern p at index i (caller guarantees i + len(p) <= len(buf))
+(defn match-at [(buf : String @ Region) (i : I32) (p : String @ Region)] : I32
+  (let [pn (string/length p)]
+    (loop [k 0]
+      (if (>= k pn)
+        1
+        (if (= (string/char-at buf (+ i k)) (string/char-at p k))
+          (recur (+ k 1))
+          0)))))
+
+(defn find-char [(s : String @ Region) (c : I32) (from : I32)] : I32
+  (let [n (string/length s)]
+    (loop [i from]
+      (if (>= i n)
+        -1
+        (if (= (string/char-at s i) c)
+          i
+          (recur (+ i 1)))))))
+
+;; ---- URL parts (url starts with "http://", 7 chars) ----
+(defn host-end [(url : String @ Region)] : I32
+  (let [n (string/length url)]
+    (loop [i 7]
+      (if (>= i n)
+        n
+        (let [c (string/char-at url i)]
+          (if (or (= c 58) (= c 47))
+            i
+            (recur (+ i 1))))))))
+
+(defn url-host [(url : String @ Region) (dest : Arena @ Region)] : String
+  (string/substring url 7 (host-end url) dest))
+
+(defn url-port [(url : String @ Region)] : I32
+  (let [he (host-end url)
+        n (string/length url)]
+    (if (and (< he n) (= (string/char-at url he) 58))
+      (loop [i (+ he 1) v 0]
+        (if (>= i n)
+          (if (> v 0) v 80)
+          (let [c (string/char-at url i)]
+            (if (and (>= c 48) (<= c 57))
+              (recur (+ i 1) (+ (* v 10) (- c 48)))
+              (if (> v 0) v 80)))))
+      80)))
+
+(defn url-path [(url : String @ Region) (dest : Arena @ Region)] : String
+  (let [p (find-char url 47 7)]
+    (if (< p 0)
+      "/"
+      (string/substring url p (string/length url) dest))))
+
+;; scheme + host[:port] of a url (everything before the path)
+(defn url-origin [(url : String @ Region) (dest : Arena @ Region)] : String
+  (let [p (find-char url 47 7)]
+    (if (< p 0)
+      url
+      (string/substring url 0 p dest))))
+
+;; ---- navigation ----
+;; NOTE (VS0 emitter): `do` only works as a function/let body -- inside an if/cond arm that is itself a
+;; value it is emitted as a ternary and breaks. So multi-effect arms are small helper functions.
+(defn nav-fail [(code : I32) (msg : String @ Region)] : I32
+  (do (slot-set 6 3)
+      (slot-set 8 code)
+      (slot-set 2 1)
+      (pg-log msg)
+      0))
+
+(defn send-request [(fd : I32) (host : String @ Region) (path : String @ Region) (dest : Arena @ Region)] : I32
+  (let [r1 (string/concat "GET " path dest)
+        r2 (string/concat r1 " HTTP/1.0\r\nHost: " dest)
+        r3 (string/concat r2 host dest)
+        req (string/concat r3 "\r\nUser-Agent: PELLEGRINO/v1\r\nAccept: text/html,text/plain,*/*\r\nConnection: close\r\n\r\n" dest)]
+    (do (slot-set 6 1)
+        (slot-set 4 fd)
+        (pg-log-n "connected; fd=" fd dest)
+        (stream-send fd req)
+        0)))
+
+(defn open-conn [(url : String @ Region) (dest : Arena @ Region)] : I32
+  (let [host (url-host url dest)
+        port (url-port url)
+        path (url-path url dest)
+        fd (stream-connect host port)]
+    (if (< fd 0)
+      (nav-fail 1 "connect FAILED")
+      (send-request fd host path dest))))
+
+(defn nav-dispatch [(url : String @ Region) (dest : Arena @ Region)] : I32
+  (cond
+    ((= (has-prefix url "https://") 1) (nav-fail 2 "https not supported yet"))
+    ((= (has-prefix url "http://") 0) (nav-fail 3 "bad url"))
+    (true (open-conn url dest))))
+
+(defn start-nav [(url : String @ Region) (dest : Arena @ Region)] : I32
+  (do
+    (stream-reset)
+    (cururl-set url)
+    (slot-set 0 0)
+    (slot-set 1 0)
+    (slot-set 2 1)
+    (slot-set 4 -1)
+    (slot-set 5 -1)
+    (slot-set 10 (+ (slot-get 10) 1))
+    (pg-log (string/concat "navigate " url dest))
+    (nav-dispatch url dest)))
+
+;; index just past the first CRLFCRLF in buf[0..len), or -1
+(defn find-hdr-end [(buf : String @ Region) (len : I32)] : I32
+  (loop [i 0]
+    (if (> (+ i 4) len)
+      -1
+      (if (and (= (string/char-at buf i) 13) (= (string/char-at buf (+ i 1)) 10)
+               (= (string/char-at buf (+ i 2)) 13) (= (string/char-at buf (+ i 3)) 10))
+        (+ i 4)
+        (recur (+ i 1))))))
+
+;; index of the first byte after "ocation: " within buf[0..hend), or -1
+(defn find-location [(buf : String @ Region) (hend : I32)] : I32
+  (loop [i 0]
+    (if (> (+ i 9) hend)
+      -1
+      (if (= (match-at buf i "ocation: ") 1)
+        (+ i 9)
+        (recur (+ i 1))))))
+
+(defn status-code [(buf : String @ Region)] : I32
+  (+ (+ (* 100 (- (string/char-at buf 9) 48)) (* 10 (- (string/char-at buf 10) 48)))
+     (- (string/char-at buf 11) 48)))
+
+(defn absolutize [(loc : String @ Region) (dest : Arena @ Region)] : String
+  (if (= (string/char-at loc 0) 47)
+    (string/concat (url-origin (cururl-get) dest) loc dest)
+    loc))
+
+(defn follow [(next : String @ Region) (dest : Arena @ Region)] : I32
+  (do (slot-set 7 (+ (slot-get 7) 1))
+      (stream-close (slot-get 4))
+      (start-nav next dest)))
+
+(defn redirect [(buf : String @ Region) (hend : I32) (dest : Arena @ Region)] : I32
+  (let [a (find-location buf hend)]
+    (if (< a 0)
+      0
+      (let [e (loop [i a]
+                (if (>= i hend)
+                  hend
+                  (if (= (string/char-at buf i) 13) i (recur (+ i 1)))))
+            loc (string/substring buf a e dest)
+            next (absolutize loc dest)]
+        (if (>= (slot-get 7) 5)
+          (nav-fail 4 "too many redirects")
+          (follow next dest))))))
+
+(defn on-headers [(hend : I32) (dest : Arena @ Region)] : I32
+  (let [buf (stream-buf)
+        code (status-code buf)
+        lg (pg-log-n "http status=" code dest)]
+    (if (and (>= code 301) (<= code 308))
+      (redirect buf hend dest)
+      0)))
+
+(defn got-headers [(he : I32) (dest : Arena @ Region)] : I32
+  (do (slot-set 5 he)
+      (slot-set 2 1)
+      (on-headers he dest)))
+
+(defn check-headers [(dest : Arena @ Region)] : I32
+  (if (>= (slot-get 5) 0)
+    0
+    (let [he (find-hdr-end (stream-buf) (stream-len))]
+      (if (< he 0)
+        0
+        (got-headers he dest)))))
+
+(defn close-conn [(fd : I32) (dest : Arena @ Region)] : I32
+  (do (stream-close fd)
+      (slot-set 4 -1)
+      (slot-set 2 1)
+      (pg-log-n "stream closed; bytes=" (stream-len) dest)
+      0))
+
+;; connection ended (EOF or error): look for headers once more, then close if no redirect replaced it
+(defn net-eof [(fd : I32) (gen : I32) (dest : Arena @ Region)] : I32
+  (let [c (check-headers dest)]
+    (if (= (slot-get 10) gen)
+      (close-conn fd dest)
+      0)))
+
+(defn mark-dirty-if [(r : I32)] : I32
+  (if (> r 0) (slot-set 2 1) 0))
+
+;; pull whatever has landed (a bounded amount per frame so the window stays responsive)
+(defn pump-net [(dest : Arena @ Region)] : I32
+  (let [fd (slot-get 4)
+        gen (slot-get 10)]
+    (if (< fd 0)
+      0
+      (loop [k 0]
+        (if (>= k 16)
+          (check-headers dest)
+          (let [r (stream-pull fd)
+                m (mark-dirty-if r)]
+            (cond
+              ((> r 0) (recur (+ k 1)))
+              ((= r 0) (check-headers dest))
+              (true (net-eof fd gen dest)))))))))
+
+(defn cur-page [(page : String @ Region)] : String
+  (let [src (slot-get 6)]
+    (cond
+      ((= src 1) (stream-buf))
+      ((= src 3) (error-page (slot-get 8)))
+      (true page))))
+
+;; draw-page's end index
+(defn cur-end [(page : String @ Region)] : I32
+  (let [src (slot-get 6)]
+    (cond
+      ((= src 1) (stream-len))
+      ((= src 3) (string/length (error-page (slot-get 8))))
+      (true (slot-get 0)))))
+
+;; first byte to draw: body start once headers are in; nothing while a live stream awaits headers
+(defn cur-start [] : I32
+  (let [src (slot-get 6)]
+    (if (= src 1)
+      (if (>= (slot-get 5) 0)
+        (slot-get 5)
+        (if (>= (slot-get 4) 0) (stream-len) 0))
+      0)))
 
 (defn advance [(revealed : I32) (step : I32) (n : I32)] : I32
   (let [r (+ revealed step)]
     (if (>= revealed n) n (if (> r n) n r))))
 
-(defn frame-loop [(ren : I32) (page : String @ Region) (n : I32) (win-w : I32) (win-h : I32)
-                  (limit : I32) (dest : Arena @ Region)] : I32
-  (let [cols (/ (- win-w 24) 12)
-        rows (/ (- win-h 52) 18)
-        step (if (> (/ n 120) 48) (/ n 120) 48)]
-    (loop [revealed 0 scroll 0 dirty 1 frames 0]
-      (let [ev (sdl2-raw-poll-event)]
-        (cond
-          ((and (> limit 0) (>= frames limit)) (do (pg-log-n "smoke limit reached; frames=" frames dest) frames))
-          ((= ev 1) (do (pg-log-n "quit event; frames=" frames dest) frames))
-          ((= ev 2)
-           (let [k (sdl2-raw-last-event-key)]
-             (cond
-               ((or (= k 27) (= k 113)) (do (pg-log-n "quit key; frames=" frames dest) frames))
-               ((= k (key-up)) (recur revealed (if (> scroll 0) (- scroll 1) 0) 1 frames))
-               ((= k (key-down)) (recur revealed (+ scroll 1) 1 frames))
-               ((= k (key-home)) (recur revealed 0 1 frames))
-               ((= k (key-end)) (recur revealed (+ scroll 20) 1 frames))
-               (true (recur revealed scroll dirty frames)))))
-          ((= ev 9)
-           (let [s (- scroll (* (sdl2-raw-last-event-wheel-delta) 3))]
-             (recur revealed (if (> s 0) s 0) 1 frames)))
-          ((> ev 0) (recur revealed scroll dirty frames))
-          (true
-           (let [nrev (advance revealed step n)
-                 redraw (or (= dirty 1) (> nrev revealed))]
-             (do (if redraw
-                   (render-frame ren page nrev n scroll cols rows win-w win-h)
-                   (sdl2_delay_raw 8))
-                 (recur nrev scroll 0 (+ frames 1))))))))))
+;; file / embedded page: reveal progressively (the live stream reveals as bytes land)
+(defn set-revealed [(v : I32)] : I32
+  (do (slot-set 0 v) (slot-set 2 1) 0))
+
+(defn pump-static [(n : I32)] : I32
+  (if (= (slot-get 6) 0)
+    (let [cur (slot-get 0)
+          step (if (> (/ n 120) 48) (/ n 120) 48)
+          nxt (advance cur step n)]
+      (if (> nxt cur)
+        (set-revealed nxt)
+        0))
+    0))
+
+(defn status-text [(dest : Arena @ Region)] : String
+  (if (= (slot-get 3) 1)
+    (string/concat (string/concat "> " (linebuf-get) dest) "_" dest)
+    (string/concat "PELLEGRINO v1   :=go to URL   esc=quit   " (cururl-get) dest)))
+
+(defn draw-status [(ren : I32) (win-w : I32) (win-h : I32)] : I32
+  (with-arena [fr :region/scratch 4096]
+    (draw-str ren (status-text &mut fr) 12 (- win-h 24))))
+
+(defn render-frame [(ren : I32) (page : String @ Region) (n : I32) (cols : I32) (rows : I32)
+                    (win-w : I32) (win-h : I32)] : I32
+  (let [scroll (slot-get 1)
+        end (cur-end page)
+        bg (sdl2-raw-set-draw-color ren 18 18 18 255)
+        cl (sdl2-raw-render-clear ren)
+        act (slot-set 11 (if (or (>= (slot-get 4) 0) (and (= (slot-get 6) 0) (< (slot-get 0) n))) 1 0))
+        last-row (draw-page ren (cur-page page) (cur-start) end scroll cols rows 12 12)
+        c1 (sdl2-raw-set-draw-color ren 214 137 16 255)
+        hz (if (>= (slot-get 4) 0)
+             (sdl2-raw-render-fill-rect ren 0 (+ (+ 12 (* (- last-row scroll) 18)) 20) win-w 2)
+             0)
+        c2 (sdl2-raw-set-draw-color ren 60 60 60 255)
+        ln (sdl2-raw-render-fill-rect ren 0 (- win-h 30) win-w 1)
+        c3 (sdl2-raw-set-draw-color ren 166 68 14 255)
+        tx (draw-status ren win-w win-h)]
+    (do (sdl2-raw-render-present ren) 0)))
+
+;; ---- input ----
+(defn go-url [(dest : Arena @ Region)] : I32
+  (do (slot-set 3 0)
+      (slot-set 7 0)
+      (start-nav (linebuf-get) dest)
+      0))
+
+(defn type-back [] : I32
+  (do (linebuf-backspace) (slot-set 2 1) 0))
+
+(defn leave-typing [] : I32
+  (do (slot-set 3 0) (slot-set 2 1) 0))
+
+(defn scroll-to [(v : I32)] : I32
+  (do (slot-set 1 (if (> v 0) v 0)) (slot-set 2 1) 0))
+
+(defn on-key-typing [(k : I32) (dest : Arena @ Region)] : I32
+  (cond
+    ((= k (key-return)) (go-url dest))
+    ((= k (key-backspace)) (type-back))
+    ((= k 27) (leave-typing))
+    (true 0)))
+
+;; 1 = quit
+(defn on-key-view [(k : I32)] : I32
+  (cond
+    ((or (= k 27) (= k 113)) 1)
+    ((= k (key-up)) (scroll-to (- (slot-get 1) 1)))
+    ((= k (key-down)) (scroll-to (+ (slot-get 1) 1)))
+    ((= k (key-home)) (scroll-to 0))
+    ((= k (key-end)) (scroll-to (+ (slot-get 1) 20)))
+    (true 0)))
+
+(defn on-key [(k : I32) (dest : Arena @ Region)] : I32
+  (if (= (slot-get 3) 1)
+    (on-key-typing k dest)
+    (on-key-view k)))
+
+(defn enter-typing [] : I32
+  (do (slot-set 3 1)
+      (linebuf-clear)
+      (linebuf-append "http://")
+      (slot-set 2 1)
+      0))
+
+(defn type-text [(t : String @ Region)] : I32
+  (do (linebuf-append t) (slot-set 2 1) 0))
+
+(defn on-text [(t : String @ Region)] : I32
+  (cond
+    ((= (slot-get 3) 1) (type-text t))
+    ((string/str-eq? t ":") (enter-typing))
+    (true 0)))
+
+(defn on-wheel [(d : I32)] : I32
+  (scroll-to (- (slot-get 1) (* d 3))))
+
+;; drain the event queue; 1 = quit requested
+(defn handle-events [(dest : Arena @ Region)] : I32
+  (loop [q 0]
+    (let [ev (sdl2-raw-poll-event)]
+      (cond
+        ((= ev 0) 0)
+        ((= ev 1) 1)
+        ((= ev 2) (if (= (on-key (sdl2-raw-last-event-key) dest) 1) 1 (recur 0)))
+        ((= ev 3) (let [x (on-text (sdl2-raw-last-event-text dest))] (recur 0)))
+        ((= ev 9) (let [x (on-wheel (sdl2-raw-last-event-wheel-delta))] (recur 0)))
+        (true (recur 0))))))
 
 (defn sdl2_delay_raw [(ms : I32)] : I32
   #target
   {:c (inline-c "(sdl2_delay_impl(ms), 0)")})
 
+(defn redraw [(ren : I32) (page : String @ Region) (n : I32) (cols : I32) (rows : I32)
+              (win-w : I32) (win-h : I32)] : I32
+  (do (slot-set 2 0)
+      (render-frame ren page n cols rows win-w win-h)))
+
+(defn present-or-wait [(ren : I32) (page : String @ Region) (n : I32) (cols : I32) (rows : I32)
+                       (win-w : I32) (win-h : I32)] : I32
+  (if (= (slot-get 2) 1)
+    (redraw ren page n cols rows win-w win-h)
+    (sdl2_delay_raw 8)))
+
+(defn frame-loop [(ren : I32) (page : String @ Region) (n : I32) (win-w : I32) (win-h : I32)
+                  (limit : I32) (dest : Arena @ Region)] : I32
+  (let [cols (/ (- win-w 24) 12)
+        rows (/ (- win-h 52) 18)]
+    (loop [frames 0]
+      (if (and (> limit 0) (>= frames limit))
+        (do (pg-log-n "smoke limit reached; frames=" frames dest) frames)
+        (if (= (handle-events dest) 1)
+          (do (pg-log-n "quit; frames=" frames dest) frames)
+          (let [p1 (pump-net dest)
+                p2 (pump-static n)
+                p3 (present-or-wait ren page n cols rows win-w win-h)]
+            (recur (+ frames 1))))))))
+
 (defn pellegrino-run [(arg : String @ Region)] : I32
   (with-arena [a :region/scratch 65536]
     (do
-      (pg-log "pellegrino v0 start")
+      (pg-log "pellegrino v1 start")
       (let [smoke (string/str-eq? arg "--smoke")
-            fd (if (and (> (string/length arg) 0) (not smoke)) (raw-open arg 0) -1)
+            surl (has-prefix arg "--smoke-url=")
+            url (if (= surl 1) (string/substring arg 12 (string/length arg) &mut a) arg)
+            isurl (has-prefix url "http")
+            fd (if (and (> (string/length url) 0) (not smoke) (= isurl 0)) (raw-open url 0) -1)
             page (if (>= fd 0) (raw-read-all fd &mut a) (embedded-page))
             n (string/length page)]
         (do
           (pg-log-n "source bytes=" n &mut a)
+          (slot-set 2 1)
           (if (< (sdl2-raw-init) 0)
             (do (pg-log "SDL init FAILED") 1)
             (let [win (sdl2-raw-create-window-borderless "PELLEGRINO" 1280 720)]
@@ -192,7 +562,9 @@
                   (if (< ren 0)
                     (do (pg-log "renderer create FAILED") 3)
                     (do (pg-log "window+renderer up (borderless 1280x720)")
-                        (frame-loop ren page n 1280 720 (if smoke 90 0) &mut a)
+                        (start-text-input)
+                        (if (= isurl 1) (start-nav url &mut a) 0)
+                        (frame-loop ren page n 1280 720 (if (or smoke (= surl 1)) 120 0) &mut a)
                         (sdl2-raw-destroy-renderer ren)
                         (sdl2-raw-destroy-window win)
                         (pg-log "clean exit")

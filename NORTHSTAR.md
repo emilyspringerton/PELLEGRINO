@@ -10,7 +10,8 @@ With <4 from america. CLEAN BUILDS FIRST.*
 
 ## 0. Status (2026-10-14)
 
-v0 is built and shipping: a borderless SDL2 window streaming a page (embedded or file) onto the glass, pure
+v1 is built and shipping: a borderless SDL2 window that fetches a URL over plain HTTP (live, winsock on Windows) and
+streams it onto the glass, or an embedded/file page; pure
 PARENA + a ~25-line C host, no malloc, logs to real files, Bazel build, headless smoke test, and CI that
 auto-tags and releases Linux + Windows bundles on every green push to `main`. The product page is `site/`.
 See `README.md` for the honest built / not-built split. Everything below this section is still the direction.

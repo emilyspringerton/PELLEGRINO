@@ -17,7 +17,7 @@ x86_64-w64-mingw32-gcc -std=gnu99 -O2 -Wall -Wextra \
   ${PELLEGRINO_VERSION:+-DPELLEGRINO_VERSION=\"$PELLEGRINO_VERSION\"} \
   -I "$PARENA_DIR/runtime" -I build/win -I "$SDL2_MINGW/include" -I "$SDL2_MINGW/include/SDL2" \
   pellegrino_host.c "$PARENA_DIR/runtime/parena_runtime.c" \
-  -o dist/win/pellegrino.exe -L "$SDL2_MINGW/lib" -lmingw32 -lSDL2main -lSDL2 -lm -mwindows -static-libgcc
+  -o dist/win/pellegrino.exe -L "$SDL2_MINGW/lib" -lmingw32 -lSDL2main -lSDL2 -lm -lws2_32 -mwindows -static-libgcc
 cp "$SDL2_MINGW/bin/SDL2.dll" dist/win/
 cp packaging/RUN.bat dist/win/RUN.bat
 [ -f PELLEGRINO_CONSTRUCT.txt ] && cp PELLEGRINO_CONSTRUCT.txt dist/win/

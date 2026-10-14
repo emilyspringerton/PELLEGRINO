@@ -14,5 +14,5 @@ bazel_dep(name = "parena", version = "0.0.0")
 git_override(
     module_name = "parena",
     remote = "https://github.com/emilyspringerton/PARENA.git",
-    commit = "523d36e2eb79ca7592c967928b17fef908a1b98d",
+    commit = "0f325c5be881763a50afc0d3d847ba76215b729e",
 )
