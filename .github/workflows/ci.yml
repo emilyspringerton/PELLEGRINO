@@ -60,6 +60,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsdl2-dev xvfb zip file openssl ca-certificates
           sudo curl -fsSL -o /usr/local/bin/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
+          echo "fd8fdff418a1758887520fa42da7e6ae39aefc788cf5e7f7bb8db6934d279fc4  /usr/local/bin/bazelisk" | sha256sum -c -
           sudo chmod +x /usr/local/bin/bazelisk
       - name: Bazel build + test (PARENA -> C -> binary, headless smoke under Xvfb)
         run: bazelisk test //... --copt=-DPELLEGRINO_VERSION='"${{ needs.version.outputs.version }}"'
@@ -115,8 +116,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mingw-w64 libsdl2-dev zip file bzip2 ca-certificates
           sudo curl -fsSL -o /usr/local/bin/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
+          echo "fd8fdff418a1758887520fa42da7e6ae39aefc788cf5e7f7bb8db6934d279fc4  /usr/local/bin/bazelisk" | sha256sum -c -
           sudo chmod +x /usr/local/bin/bazelisk
           curl -fsSL -o sdl2-mingw.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-devel-2.30.9-mingw.tar.gz
+          # SDL2.dll ships in the user-facing zip: pin it like mbedTLS (scripts/fetch_mbedtls.sh)
+          echo "b188d165dc4a0372042bff3d0c18e9bb90772581e92a7b8b47b521b47714f75c  sdl2-mingw.tar.gz" | sha256sum -c -
           tar xzf sdl2-mingw.tar.gz
           echo "SDL2_MINGW=$PWD/SDL2-2.30.9/x86_64-w64-mingw32" >> "$GITHUB_ENV"
       - name: Generate Source Construct
@@ -174,7 +178,7 @@ jobs:
           [ -f "$WINEPREFIX/drive_c/windows/system32/zlib1.dll" ] || { [ -f "$Z" ] && cp "$Z" "$WINEPREFIX/drive_c/windows/system32/"; } || true
           printf '#!/bin/sh\nexec "%s" "%s/winapp/pellegrino.exe" "$@"\n' "$WINE" "$PWD" > wine-run.sh
           chmod +x wine-run.sh
-          PELLEGRINO_BIN="$PWD/wine-run.sh" bash tests/smoke.sh
+          PELLEGRINO_BIN="$PWD/wine-run.sh" PELLEGRINO_WINE="$WINE" PELLEGRINO_EXE_DIR="$PWD/winapp" bash tests/smoke.sh
 
   release:
     name: Tag & Release

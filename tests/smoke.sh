@@ -12,6 +12,10 @@
 #  10. navigate away mid-stream        the live stream being left is closed (no fd / TLS session leak)
 #  11. TLS clean close                 an authenticated close_notify is not flagged
 #  12. TLS truncation                  a stream cut without close_notify is flagged, never shown as complete
+#  13. refused connect fails fast      a closed port must not cost the 5 s connect timeout (Winsock reports a
+#                                      failed non-blocking connect via exceptfds, not writefds)
+#  14. bundle beside the exe           (Windows/Wine only: PELLEGRINO_WINE + PELLEGRINO_EXE_DIR) cacert.pem next
+#                                      to the exe is found even when its directory is not ANSI-representable
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # PELLEGRINO_BIN overrides the binary for ad-hoc runs; under `bazel test` it comes from the runfiles.
@@ -133,5 +137,29 @@ SSL_CERT_FILE="$WORK/good.pem" run "--smoke-url=https://localhost:$TLSPORT/trunc
 for n in "http status=200" "tls: stream ended WITHOUT close_notify" "stream closed; bytes=" "clean exit"; do need "$n"; done
 run "--smoke-url=http://127.0.0.1:$PORT/trunc"
 absent "WITHOUT close_notify"
+
+echo "== 13. a refused connection fails fast (no 5 s connect timeout)"
+ms() { echo $(( $(date +%s%N) / 1000000 )); }
+B0=$(ms); run --smoke; B1=$(ms)
+CLOSED=$(free_port)
+run "--smoke-url=http://127.0.0.1:$CLOSED/"; B2=$(ms)
+need "connect FAILED"
+EXTRA=$(( (B2 - B1) - (B1 - B0) ))
+[ "$EXTRA" -lt 3000 ] || { echo "FAIL: refused connect took ${EXTRA} ms longer than an idle run (connect timeout?)"; cat pellegrino.log; exit 1; }
+
+if [ -n "${PELLEGRINO_WINE:-}" ] && [ -d "${PELLEGRINO_EXE_DIR:-/nonexistent}" ]; then
+  echo "== 14. cacert.pem beside the exe, directory name not representable in the ANSI code page"
+  UD="$WORK/$(printf '\343\203\206\343\202\271\343\203\210_\343\203\246\343\203\274\343\202\266\343\203\274')"   # テスト_ユーザー
+  mkdir -p "$UD"
+  cp "$PELLEGRINO_EXE_DIR"/pellegrino.exe "$PELLEGRINO_EXE_DIR"/*.dll "$UD"/
+  cp good.pem "$UD/cacert.pem"
+  rm -f pellegrino.log pellegrino.out.log pellegrino.err.log
+  # cwd ($WORK, where the log lands) is NOT the exe's directory, and there is no SSL_CERT_FILE at all:
+  # the only way to trust good.pem is the cacert.pem beside the exe
+  env -u SSL_CERT_FILE LC_ALL=C.UTF-8 xvfb-run -a "$PELLEGRINO_WINE" "$UD/pellegrino.exe" \
+      "--smoke-url=https://localhost:$TLSPORT/index.html"
+  for n in "tls TLSv1" "http status=200"; do need "$n"; done
+  absent "tls FAILED"
+fi
 
 echo "smoke OK"

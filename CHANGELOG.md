@@ -11,7 +11,7 @@
 - Smoke suite extended (trusted, large multi-record body, untrusted cert, wrong hostname, unreadable bundle,
   http->https redirect); also run against the cross-compiled exe under Wine (new non-gating `windows-smoke` CI job).
 - Windows packaging compiles the pinned mbedTLS with mingw (`scripts/fetch_mbedtls.sh`, sha256-verified).
-- PARENA: `stream-connect-tls` & friends @cd91575 (`make test-net-stream`, `make test-net-stream-tls`).
+- PARENA: `stream-connect-tls` & friends @d3e274b (`make test-net-stream`, `make test-net-stream-tls`).
 - Hardening from an adversarial multi-lens review (each item reproduced before it was fixed):
   - navigating away from a page that is still streaming now closes that socket / TLS session (it leaked
     one fd per abandoned navigation, and left the TLS session running);
