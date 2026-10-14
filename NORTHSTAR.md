@@ -102,5 +102,7 @@ number is measured on real runs, not asserted.
 
 ## 9. Non-goals
 
-A standards-compliant general-purpose browser (beyond what the protocol ladder implies). A JS engine. CSS parity. An extension ecosystem. Anything that adds runtime
+A standards-compliant general-purpose browser (beyond what the protocol ladder implies). A JS engine *inside* the core.
+(The founder's own idea for scripting: don't embed one — "shell out JS to Wasm," streaming script bytes into an isolated
+worker with no DOM that dies with the frame. A vibe worth keeping for later; no mechanism adopted.) CSS parity. An extension ecosystem. Anything that adds runtime
 brakes to look responsible.

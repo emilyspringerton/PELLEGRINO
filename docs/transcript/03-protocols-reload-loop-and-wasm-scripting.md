@@ -100,7 +100,7 @@ This stateless approach opens up some wild possibilities. What should we flesh o
 
 ## Turn 9 — You
 
-*(prompt not captured)*
+> can we shell out js to wasm?like we write some kind of crazy wrapper to stream the js into wasm?
 
 ### Gemini
 

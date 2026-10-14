@@ -7,3 +7,5 @@ we embrace the fuck it i dont give a shit if the layout shifts and shit as long 
 that would be so cooul you could like visualize the page downloading and rendering in real time
 
 in most circumstances we should be able to get SOMETHING on the page by 60 ms after the request is made; unless the dns or something is fucked up obviously
+
+can we shell out js to wasm?like we write some kind of crazy wrapper to stream the js into wasm?
