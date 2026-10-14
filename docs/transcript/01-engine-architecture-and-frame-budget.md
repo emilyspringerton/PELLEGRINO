@@ -139,9 +139,9 @@ Instead of walking a tree recursively, we write the elements into a flat `Vec La
 Once the layout offsets are calculated, we pass the raw pointer of our layout array straight into the graphics pipeline. PARENA’s `sdl2` module interfaces directly with native C execution.
 We bypass modern layout layers entirely. The engine takes the geometry bounding boxes and immediately feeds them to a single-pass pixel blitter.
 
-#### 1. The frame data is rendered into an arena-backed `buffer`.
-#### 2. A single raw FFI call dumps that buffer directly into an SDL2 texture slice.
-#### 3. The hardware flips the buffer.
+1. The frame data is rendered into an arena-backed `buffer`.
+2. A single raw FFI call dumps that buffer directly into an SDL2 texture slice.
+3. The hardware flips the buffer.
 
 #### 5. The "No-Brakes" Instant Reset
 At the 39th millisecond, the frame is drawn on screen. If the user clicks a link to navigate away, a standard engine spends time destructing objects, cleaning up closures, and running GC cycles.

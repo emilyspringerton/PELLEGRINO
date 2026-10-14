@@ -129,10 +129,10 @@ QuickJS is an incredibly small, fast, standards-compliant ECMAScript engine writ
 Instead of waiting for a `.js` file to fully download, create an abstract syntax tree (AST), and compile, our PARENA wrapper feeds the raw TCP socket packets directly into the Wasm instance's memory buffer using an explicit streaming hook.
 PARENA's low-level `#target` FFI system allows us to interact with a lightweight Wasm runtime (like `Wasmtime` or a fast C-bound interpreter) natively. The data flow goes like this:
 
-#### 1. A packet containing a chunk of JS code hits our `net/http` or `net/tcp` socket.
+1. A packet containing a chunk of JS code hits our `net/http` or `net/tcp` socket.
 2. PARENA reads the raw bytes directly into a slice pointing straight at the Wasm guest memory space.
 3. We execute a fast FFI call to the Wasm instance: `quickjs_eval_chunk(wasm_memory_pointer, chunk_len)`.
-#### 4. The inside of the Wasm module evaluates the script line-by-line as it streams in.
+4. The inside of the Wasm module evaluates the script line-by-line as it streams in.
 
 #### 3. Strictly No DOM: Pure Side-Effect Messaging
 To keep this blazing fast, we do not expose a DOM to the JavaScript engine. The JS running inside the Wasm container has absolutely no concept of a window, a document, or page elements. It cannot create memory leaks or block our layout thread because it can't touch it.
@@ -215,7 +215,7 @@ The browser engine configures two critical FFI functions (Wasm Host Exports) tha
 #### 3. The 100% Native PARENA Flow-of-Control
 Because PARENA handles multiple compilation targets, you get a clean separation of concerns without code duplication. The sequence of events when a page is requested behaves like a hardware loop:
 
-#### 1. The Request: PARENA's `net/http` module initiates a non-blocking connection.
+1. The Request: PARENA's `net/http` module initiates a non-blocking connection.
 2. Instance Spawn: The core browser loop invokes the local Wasm module, instantiating a localized instance with its own isolated 4MB linear memory page.
 3. The Firehose Stream: As network packets drop from the wire, the C engine writes the raw string data straight into the Wasm context's memory buffer segment.
 4. Immediate Side-Effects: The `QuickJS` engine inside the Wasm container evaluates the input and pushes integer mutations across the FFI boundary back to the browser.
