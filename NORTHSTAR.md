@@ -100,12 +100,8 @@ number is measured on real runs, not asserted.
 
 ## 8. Open questions for the founder
 
-1. **Name.** "Pellegrino" is also a real mineral-water brand; the Unlicense covers copyright, not trademark. Keep it, keep
-   it quieter, or rename (PEREGRINE, CICINDELA, ODONATA, CYBISTER were the alternates)?
-2. **Voice.** How much of the provocation ("F*ck your trademarks", `<4 America` in headers/banners) lives in the product
-   vs. the README and art?
-3. **Safety line.** Confirm the plain statement: trusted content only, no sandbox, until a real isolation story exists.
-4. **Distribution.** Signed releases + CONSTRUCT like every repo, or something more mixtape-shaped?
+1. **Safety line.** Confirm the plain statement: trusted content only, no sandbox, until a real isolation story exists.
+2. **Distribution.** Signed releases + CONSTRUCT like every repo (what CI does today), or something more mixtape-shaped?
 
 ## 9. Non-goals
 
