@@ -36,6 +36,7 @@ rest of the user side was not captured.
 
 - Non-blocking TCP into the arena (01–02); HTTP/2 multiplexing and HTTP/3-over-QUIC with per-stream parsing (03).
 - 1-second stateless reload as a WebSocket replacement for live feeds — wipe, GET, repaint (03).
+- **Founder verdict (2026-10-14): "the HTTP2/3 stuff is good"** — multiplexing is endorsed as a core vibe (see `../NORTHSTAR.md` §2b).
 - Wire-to-glass timing ledgers: 40 ms and 60 ms budgets *(unverified)* (01–02).
 
 ## 5. Scripting
