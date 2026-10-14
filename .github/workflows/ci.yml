@@ -85,12 +85,18 @@ jobs:
           name: PELLEGRINO_Builds_${{ github.run_number }}_${{ github.sha }}
           path: artifacts/*
           if-no-files-found: error
+      # Flat staging dir so the release job's `cp artifacts/<name>/<file>` is unambiguous
+      # (upload-artifact otherwise keeps the dist/ prefix of a multi-path upload).
+      - name: Stage release files (flat)
+        run: |
+          set -euo pipefail
+          mkdir -p release_bin
+          cp dist/pellegrino_linux_x86_64.zip release_bin/
+          cp PELLEGRINO_CONSTRUCT.txt release_bin/
       - uses: actions/upload-artifact@v4
         with:
           name: PELLEGRINO_Release_Linux_${{ github.run_number }}
-          path: |
-            dist/pellegrino_linux_x86_64.zip
-            PELLEGRINO_CONSTRUCT.txt
+          path: release_bin/*
           if-no-files-found: error
 
   windows:
@@ -122,10 +128,15 @@ jobs:
           name: PELLEGRINO_Builds_Windows_${{ github.run_number }}_${{ github.sha }}
           path: dist/pellegrino_windows.zip
           if-no-files-found: error
+      - name: Stage release files (flat)
+        run: |
+          set -euo pipefail
+          mkdir -p release_bin_windows
+          cp dist/pellegrino_windows.zip release_bin_windows/
       - uses: actions/upload-artifact@v4
         with:
           name: PELLEGRINO_Release_Windows_${{ github.run_number }}
-          path: dist/pellegrino_windows.zip
+          path: release_bin_windows/*
           if-no-files-found: error
 
   release:
@@ -148,6 +159,7 @@ jobs:
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
+          find artifacts -type f | sort
           mkdir out
           cp artifacts/PELLEGRINO_Release_Linux_*/pellegrino_linux_x86_64.zip out/
           cp artifacts/PELLEGRINO_Release_Linux_*/PELLEGRINO_CONSTRUCT.txt out/
