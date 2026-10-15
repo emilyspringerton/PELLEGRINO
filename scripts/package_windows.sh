@@ -32,12 +32,12 @@ printf '%s\0' "$MB"/library/*.c | xargs -0 -n 1 -P "$(nproc)" bash -c 'mbedtls_o
 
 "$CC" -std=gnu99 -O2 -Wall -Wextra \
   -DPARENA_NO_MALLOC -DPARENA_NO_TTF -DPARENA_STATIC_POOL_BYTES=33554432 -DPARENA_STATIC_BLOCK_BYTES=262144 \
-  -DPARENA_WITH_TLS -DPARENA_TLS_STATIC_HEAP -DPARENA_TLS_HEAP_STATS \
+  -DPARENA_WITH_TLS -DPARENA_TLS_STATIC_HEAP -DPARENA_TLS_HEAP_STATS -DPARENA_WITH_QUIC_CRYPTO \
   "-DMBEDTLS_USER_CONFIG_FILE=\"pellegrino_user_config.h\"" \
   ${PELLEGRINO_VERSION:+-DPELLEGRINO_VERSION=\"$PELLEGRINO_VERSION\"} \
   -I "$PARENA_DIR/runtime" -I build/win -I "$SDL2_MINGW/include" -I "$SDL2_MINGW/include/SDL2" \
   -I "$MB/include" -I third_party/mbedtls \
-  pellegrino_host.c "$PARENA_DIR/runtime/parena_runtime.c" build/win/mbedtls/*.o \
+  pellegrino_host.c "$PARENA_DIR/runtime/parena_runtime.c" "$PARENA_DIR/runtime/aead/monocypher.c" build/win/mbedtls/*.o \
   -o dist/win/pellegrino.exe -L "$SDL2_MINGW/lib" -lmingw32 -lSDL2main -lSDL2 -lm -lws2_32 -lbcrypt -mwindows -static-libgcc
 cp "$SDL2_MINGW/bin/SDL2.dll" dist/win/
 cp "$CA" dist/win/cacert.pem

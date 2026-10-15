@@ -7,7 +7,7 @@ P="${PARENA:-$here/../PARENA}"
 S="$P/stdlib"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 "$P/parena" build "$S/string.prn" "$S/array.prn" "$S/io.prn" "$S/sdl2.prn" "$S/bytes.prn" "$S/compress/inflate.prn" \
-  "$S/image/png.prn" "$S/image/store.prn" "$S/net/stream.prn" "$here/pellegrino.prn" -o "$tmp/pellegrino_gen.inc"
+  "$S/image/png.prn" "$S/image/store.prn" "$S/net/stream.prn" "$S/net/quic_wire.prn" "$S/net/h3_wire.prn" "$S/crypto/quic_crypto.prn" "$S/net/quic_tls.prn" "$S/net/quic_client.prn" "$here/pellegrino.prn" -o "$tmp/pellegrino_gen.inc"
 cc -O1 -DPARENA_NO_MALLOC -DPARENA_NO_TTF -I"$tmp" -I"$P/runtime" -o "$tmp/embed_test" "$here/tests/embed_test.c" \
   "$P/runtime/parena_runtime.c" -lSDL2 -lm
 SDL_VIDEODRIVER=dummy "$tmp/embed_test" "${1:-$here/embed_frame.ppm}"

@@ -58,3 +58,12 @@ Read the monorepo root `CLAUDE.md` (The Emily Way) first; this file is repo-spec
   blank rows just emitted (slot 1656 = run length, 1657 = the row it ended on). Slots 1655 = hash of `li` (nested list
   test), 1658 = hash of `pre`, 1660 = HTML-document flag (whitespace collapsing, `soft-ws?`), 1661 = last logged rows.
   Do not put a blank row back into `pre-break`: author resets depend on margins being the only source of gaps.
+- HTTP/3 (v1.13): `h3-*` / `pump-h3` / `nav-url` sit just above `nav-dispatch`; state slots 4010 (in flight), 4011 (this
+  navigation asked for h3://, so no TCP fallback), Alt-Svc cache 4020+2k (origin key = host hash mixed with port) /
+  4021+2k (h3 port), 4036 next victim. The QUIC connection is PARENA's single static block (`quic-static-conn`);
+  never allocate a second one. The response is replayed into the page stream buffer (`stream-append-bytes`) and
+  `check-headers` runs, so redirects/Alt-Svc/etc. are the existing code paths. `h3-poll` uses its own `with-arena`;
+  do not allocate per-frame from `dest`. Do not initialise anything in mbedTLS before `stream_tls_global_init()`
+  (static-heap allocator: init-before-heap + free-after-heap = FATAL). TLS/QUIC verification stays non-optional.
+  Tests need `python3 -c "import aioquic"` (pip install aioquic); `user.bazelrc` can pass its site-packages with
+  `--test_env=PYTHONPATH=...`.

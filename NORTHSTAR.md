@@ -46,8 +46,8 @@ so one lost packet no longer freezes the other streams. That is exactly PELLEGRI
 the same frame arena as it arrives, and the visualizer shows the page stitching itself together from many streams at
 once instead of scrolling top to bottom. The founder called this part good; it is a pillar, not a footnote.
 
-Honest status, from reading the tree: PARENA has `net/tcp`, `net/udp`, `net/tls`, `net/http` (HTTP/1.1-style client),
-`net/dns`, `net/wire`. It has **no HTTP/2, no HPACK, no QUIC, no HTTP/3**. Per the monorepo's *Core Deps Are PARENA-First*
+Honest status (updated 2026-10-15): PARENA now has `net/quic_client` (QUIC v1 + TLS 1.3 + HTTP/3, QPACK static) as well as
+`net/tcp`, `net/udp`, `net/tls`, `net/http`, `net/dns`, `net/wire`. It still has **no HTTP/2 and no HPACK**. Per the monorepo's *Core Deps Are PARENA-First*
 rule those are built in PARENA before the feature that needs them — so the protocol ladder below is real, sequenced work,
 not a switch we flip.
 
@@ -88,8 +88,10 @@ once" feeling):
    the next step for HTTP/2; mbedTLS cannot do QUIC, so HTTP/3 will need its own TLS answer.
 3. **HTTP/2** — frame codec, stream ids, HPACK, flow control; interleaved streams into the arena. First true
    multiplexed page load.
-4. **HTTP/3 over QUIC** — QUIC transport over `net/udp` plus its own framing (HTTP/3 is *not* HTTP/2's framing re-run);
-   independent streams, no head-of-line blocking. The largest single piece of work in the project.
+4. **HTTP/3 over QUIC** — **built (v1.13)**: QUIC v1 transport + TLS 1.3 in PARENA over `net/udp`-style
+   binary-safe datagrams, HTTP/3 framing + QPACK; independent streams, no head-of-line blocking. Verified against
+   aioquic and live servers; limits (one connection, GET only, static QPACK, no congestion control) in README.md.
+   Still open: HTTP/2 (rung 3), multiplexing several streams into the arena at once, 0-RTT, a congestion controller.
 
 The 40 ms / 60 ms targets from the founder's own prompts apply to the whole ladder: *something* on the glass fast, and the
 number is measured on real runs, not asserted.

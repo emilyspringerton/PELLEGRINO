@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Tiny HTTP/1.0 (and HTTPS) fixture server for tests/smoke.sh.
 
-  smoke_server.py PORT ROOT [CERT KEY] [--redirect-to URL]
+  smoke_server.py PORT ROOT [CERT KEY] [--redirect-to URL] [--alt-svc VALUE]
 
 Serves files under ROOT. /slow/<file> answers <file> after a 0.4 s pause (a stylesheet that arrives after the page
 has already painted). /old answers 301 -> /index.html (relative) and, with --redirect-to, /hop answers
 301 -> that absolute URL. /hang sends headers and a few bytes, then holds the connection open (a page that
 is still streaming). /trunc promises Content-Length: 100000, sends a few bytes and drops the connection
-(over TLS: without a close_notify). With CERT and KEY it speaks TLS. Prints nothing; killed by the test.
+(over TLS: without a close_notify). With --alt-svc VALUE every response carries `Alt-Svc: VALUE`. With CERT and KEY it speaks TLS. Prints nothing; killed by the test.
 """
 import http.server
 import os
@@ -23,6 +23,11 @@ def main():
     if "--redirect-to" in args:
         i = args.index("--redirect-to")
         redirect_to = args[i + 1]
+        del args[i:i + 2]
+    alt_svc = None
+    if "--alt-svc" in args:
+        i = args.index("--alt-svc")
+        alt_svc = args[i + 1]
         del args[i:i + 2]
     port, root = int(args[0]), args[1]
     cert, key = (os.path.abspath(args[2]), os.path.abspath(args[3])) if len(args) >= 4 else (None, None)
@@ -78,6 +83,11 @@ def main():
             self.send_header("Content-Length", str(len(out)))
             self.end_headers()
             self.wfile.write(out)
+
+        def end_headers(self):
+            if alt_svc:
+                self.send_header("Alt-Svc", alt_svc)
+            super().end_headers()
 
         def log_message(self, *a):
             pass

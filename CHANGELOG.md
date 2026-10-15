@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-10-15 (v1.13 -- HTTP/3, kanban #650-#655)
+- **HTTP/3 over QUIC.** `h3://host/path` fetches over QUIC v1 + TLS 1.3 + HTTP/3 (QPACK static, Huffman decode);
+  `https://` upgrades to it after an `Alt-Svc: h3=":port"` response, per origin (host + port) in a small
+  per-process cache, and any failure falls back to TCP+TLS transparently (`h3://` shows an error page instead).
+  Redirects inside an `h3://` navigation to the same origin stay on HTTP/3. The transport is entirely PARENA
+  (`PARENA` 5 new modules, see its CHANGELOG): non-blocking, stepped by `pump-h3` from the frame loop; the response is
+  handed to the existing page pipeline as an HTTP/1.1 head + body appended to the shared stream buffer, so status,
+  redirects, Alt-Svc, CSS/markdown detection all work unchanged. No new heap use: one static connection block
+  (`PARENA_QUIC_STATIC_BYTES`, 9 MiB BSS, 4 MiB body cap). Certificate/hostname verification always on.
+  Slots 4010/4011 (state, forced) and 4020-4036 (Alt-Svc cache); error pages 8 (HTTP/3 failed) and 9 (certificate).
+- Build: `BUILD.bazel` adds the five PARENA stdlib files, `-DPARENA_WITH_QUIC_CRYPTO` and `@parena//runtime:monocypher`;
+  `scripts/package_windows.sh` adds the flag and `runtime/aead/monocypher.c`; `MODULE.bazel` pin -> PARENA `a29596c`.
+- Tests: `tests/smoke.sh` sections 21-24 (aioquic server, `tests/smoke_h3_server.py`; skipped with a loud message when
+  aioquic is not importable): explicit h3://, redirect, untrusted cert, wrong hostname, dead UDP port (< 8 s),
+  Alt-Svc upgrade, Alt-Svc to a dead port falls back. `smoke_server.py` gained `--alt-svc`. Sections 1-20 pass
+  unchanged under the new build. Also run by hand against live Cloudflare, Google, YouTube and example.com.
+- Found and fixed while doing it: mbedTLS's static-heap allocator aborts ("free outside of managed space") if
+  anything is initialised before the heap is installed and freed after -- QUIC's randomness now comes from
+  net/stream's own DRBG instead of a second entropy context; `Alt-Svc` header matching is case-insensitive.
+- Embedders (SHANKPIT's vendored `pellegrino_gen.inc`) that regenerate must add the five PARENA stdlib files to their `parena build` list
+  (see `scripts/embed_test.sh`); without `-DPARENA_WITH_QUIC_CRYPTO` the runtime's `quic_*` primitives are stubs that report failure, so
+  such a host still compiles and links and HTTP/3 simply never succeeds (embed mode never navigates). `scripts/embed_test.sh` passes that way.
+- Honest: the Windows exe with HTTP/3 was not built or run here (no mingw on this box); the Linux build and smoke
+  suite were run (Bazel, Xvfb, SDL2 2.30). (session: unknown)
+
 ## 2026-10-15 (CI fix, kanban #642)
 - Fixed the red build (5 consecutive failing `main` runs since the v1.11 embed API): `MODULE.bazel` still pinned
   PARENA `86bb47c`, but the embed code calls `sdl2-raw-create-surface-renderer` / `sdl2_create_surface_renderer_impl`,

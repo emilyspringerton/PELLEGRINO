@@ -58,12 +58,14 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev xvfb zip file openssl ca-certificates
+          sudo apt-get install -y libsdl2-dev xvfb zip file openssl ca-certificates python3-pip
+          # aioquic: the independent HTTP/3 server tests/smoke.sh sections 21-24 talk to (skipped if absent)
+          python3 -m pip install --user --break-system-packages aioquic
           sudo curl -fsSL -o /usr/local/bin/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
           echo "fd8fdff418a1758887520fa42da7e6ae39aefc788cf5e7f7bb8db6934d279fc4  /usr/local/bin/bazelisk" | sha256sum -c -
           sudo chmod +x /usr/local/bin/bazelisk
       - name: Bazel build + test (PARENA -> C -> binary, headless smoke under Xvfb)
-        run: bazelisk test //... --copt=-DPELLEGRINO_VERSION='"${{ needs.version.outputs.version }}"'
+        run: bazelisk test //... --test_env=PYTHONPATH="$(python3 -m site --user-site)" --copt=-DPELLEGRINO_VERSION='"${{ needs.version.outputs.version }}"'
       - name: Generate Source Construct (Principle 21), verify determinism
         run: |
           set -euo pipefail

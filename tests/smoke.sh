@@ -344,6 +344,65 @@ absent "never.css"
 absent "alt.css"
 if [ -s pellegrino.err.log ] && grep -q "out of memory" pellegrino.err.log; then echo "FAIL: out of memory"; cat pellegrino.err.log; exit 1; fi
 
+# ---- HTTP/3 (QUIC) ------------------------------------------------------------------------------------
+# Needs aioquic (pip install aioquic) as the independent HTTP/3 server; skipped, loudly, when missing.
+if python3 -c "import aioquic" 2>/dev/null; then
+  H3SERVER="$HERE/smoke_h3_server.py"
+  [ -f "$H3SERVER" ] || H3SERVER="${TEST_SRCDIR:-}/${TEST_WORKSPACE:-_main}/tests/smoke_h3_server.py"
+  H3PORT=$(free_port)
+  python3 "$H3SERVER" "$H3PORT" www good.pem good.key > h3server.out 2>&1 & PIDS+=($!)
+  for _ in $(seq 1 80); do grep -q READY h3server.out 2>/dev/null && break; sleep 0.1; done
+  grep -q READY h3server.out || { echo "h3 server did not start"; cat h3server.out; exit 1; }
+
+  echo "== 21. h3:// explicit HTTP/3 (QUIC + TLS 1.3 in PARENA, certificate verified)"
+  SSL_CERT_FILE="$WORK/good.pem" run "--smoke-url=h3://localhost:$H3PORT/index.html"
+  for n in "navigate h3://localhost:$H3PORT/index.html" "h3: connecting localhost:$H3PORT" "h3 ok; bytes=" "http status=200" "clean exit"; do need "$n"; done
+  absent "connected; fd="
+  absent "tls TLSv1"
+  absent "h3 FAILED"
+
+  echo "== 21b. h3://: a redirect is followed over HTTP/3"
+  SSL_CERT_FILE="$WORK/good.pem" run "--smoke-url=h3://localhost:$H3PORT/old"
+  for n in "http status=301" "http status=200" "clean exit"; do need "$n"; done
+  absent "h3 FAILED"
+
+  echo "== 22. h3://: an untrusted certificate is refused, nothing rendered"
+  SSL_CERT_FILE="$WORK/other.pem" run "--smoke-url=h3://localhost:$H3PORT/index.html"
+  for n in "h3 FAILED status=-3" "clean exit"; do need "$n"; done
+  absent "http status="
+  absent "falling back"
+
+  echo "== 22b. h3://: a wrong host name is refused"
+  SSL_CERT_FILE="$WORK/wrong.pem" run "--smoke-url=h3://localhost:$H3PORT/index.html"
+  for n in "h3 FAILED status=-3" "clean exit"; do need "$n"; done
+  absent "http status="
+
+  echo "== 22c. h3://: a port with no server fails fast with an error page (no 15 s wait)"
+  T0=$(date +%s)
+  SSL_CERT_FILE="$WORK/good.pem" run "--smoke-url=h3://localhost:$(free_port)/index.html"
+  T1=$(date +%s)
+  for n in "h3 FAILED status=-6" "clean exit"; do need "$n"; done
+  [ $((T1 - T0)) -le 8 ] || { echo "FAIL: refused UDP port took $((T1 - T0)) s"; cat pellegrino.log; exit 1; }
+
+  echo "== 23. Alt-Svc: https:// is upgraded to HTTP/3 after a response advertises it"
+  ASPORT=$(free_port)
+  serve "$ASPORT" www good.pem good.key --alt-svc "h3=\":$H3PORT\"; ma=86400"
+  wait_port "$ASPORT"
+  SSL_CERT_FILE="$WORK/good.pem" run "--smoke-nav=https://localhost:$ASPORT/index.html https://localhost:$ASPORT/index.html"
+  for n in "tls TLSv1" "alt-svc: h3 port $H3PORT" "h3: connecting localhost:$H3PORT" "h3 ok; bytes=" "clean exit"; do need "$n"; done
+  absent "h3 FAILED"
+
+  echo "== 24. Alt-Svc to a dead UDP port falls back to TCP+TLS transparently"
+  DEADPORT=$(free_port)
+  FBPORT=$(free_port)
+  serve "$FBPORT" www good.pem good.key --alt-svc "h3=\":$DEADPORT\"; ma=86400"
+  wait_port "$FBPORT"
+  SSL_CERT_FILE="$WORK/good.pem" run "--smoke-nav=https://localhost:$FBPORT/index.html https://localhost:$FBPORT/index.html"
+  for n in "alt-svc: h3 port $DEADPORT" "h3: connecting localhost:$DEADPORT" "h3 FAILED status=-6" "falling back to TCP+TLS" "http status=200" "clean exit"; do need "$n"; done
+else
+  echo "== 21-24. HTTP/3 SKIPPED: python3 aioquic is not importable (pip install aioquic)"
+fi
+
 if [ -n "${PELLEGRINO_WINE:-}" ] && [ -d "${PELLEGRINO_EXE_DIR:-/nonexistent}" ]; then
   echo "== 14. cacert.pem beside the exe, directory name not representable in the ANSI code page"
   UD="$WORK/$(printf '\343\203\206\343\202\271\343\203\210_\343\203\246\343\203\274\343\202\266\343\203\274')"   # テスト_ユーザー

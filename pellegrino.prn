@@ -3877,11 +3877,13 @@
 ;; slot 6 src (0 file/embedded page, 1 live stream, 3 error page)   7 redirects   8 error code
 ;; slot 13/14 pending click (px x/y, -1 none)   15/16 href [start,end) of the link under it (-1 none)
 ;; slot 17 smoke: synthesize a click at frame 60   18-23 keyboard link selection (see note-sel)
+;; slot 4010 HTTP/3 fetch in flight (1)   4011 this navigation asked for h3:// (no TCP fallback)
+;; slot 4020+2k / 4021+2k Alt-Svc cache: host hash+1 (0 free) / h3 port, k < 8;  4036 next victim
 (defn embedded-page [] : String
   "<h1>PELLEGRINO v1</h1>
 <p>all gas; no brakes; powered by PARENA.</p>
 <p>CLEAN BUILDS FIRST.</p>
-<p>Press : and type a URL (http:// or https://) then Enter. Bytes are painted as they land off the wire; the newest glow amber.</p>
+<p>Press : and type a URL (http://, https:// or h3://) then Enter. Bytes are painted as they land off the wire; the newest glow amber.</p>
 <p>Keys: Up/Down/Home/End or mouse wheel scroll, : address bar, Esc/q quit.</p>
 <p>Start with a URL or a file path as the first argument.</p>
 <p>With love, <4 America.</p>
@@ -3892,6 +3894,8 @@
     ((= code 1) "<h1>could not connect</h1>\n<p>DNS or TCP connect failed (5 s timeout). Check the URL, then press : and type another.</p>\n")
     ((= code 3) "<h1>bad URL</h1>\n<p>Use http://host/path or https://host/path</p>\n")
     ((= code 4) "<h1>too many redirects</h1>\n")
+    ((= code 8) "<h1>HTTP/3 connection failed</h1>\n<p>The server did not answer over QUIC (UDP may be blocked, or the server has no HTTP/3). Use https:// to fall back to TCP.</p>\n")
+    ((= code 9) "<h1>certificate rejected</h1>\n<p>The HTTP/3 server's certificate chain or host name did not verify. Nothing was rendered.</p>\n")
     ((>= code 5) (stream-tls-page))
     (true "<h1>error</h1>\n")))
 
@@ -4059,9 +4063,177 @@
       (open-tls host port path url dest)
       (open-plain host port path url dest))))
 
+;; ---- HTTP/3 (v1.12) -------------------------------------------------------------------------------
+;; The transport is PARENA's own (net/quic_client: QUIC v1 + TLS 1.3 + HTTP/3, certificate and host name
+;; verified, no bypass). It is NON-BLOCKING: h3-begin sends the ClientHello and returns; pump-h3 (frame loop)
+;; advances the connection a little each frame. When the response is complete it is handed to the SAME page
+;; pipeline as TCP/TLS: an HTTP/1.1-shaped head + the body are appended to the shared stream buffer, then
+;; check-headers runs (status, redirects, Alt-Svc) exactly as for a socket.
+;;   h3://host[:port]/path   explicit: HTTP/3 only, failure is an error page
+;;   https://host/path       upgraded to HTTP/3 once an earlier response from that host advertised
+;;                           `Alt-Svc: h3=":port"`; ANY HTTP/3 failure falls back to TCP+TLS transparently
+;; POST always uses TCP. Sub-resources (images, stylesheets) still use TCP+TLS.
+(defn h3-scheme? [(url : String @ Region)] : I32
+  (has-prefix url "h3://"))
+
+;; "h3://host/p" -> "https://host/p"; anything else unchanged
+(defn nav-url [(url : String @ Region) (dest : Arena @ Region)] : String
+  (if (= (h3-scheme? url) 1)
+    (string/concat "https://" (string/substring url 5 (string/length url) dest) dest)
+    url))
+
+;; small stable hash of a host name (1 .. 2^25)
+(defn host-hash [(host : String @ Region)] : I32
+  (let [n (string/length host)]
+    (loop [i 0 h 7]
+      (if (>= i n)
+        (+ h 1)
+        (recur (+ i 1) (mod (+ (* h 31) (bit-and (string/char-at host i) 255)) 33554393))))))
+
+;; Alt-Svc cache key: an ORIGIN (host + port), as the RFC scopes it -- two servers on one host never share it
+(defn origin-key [(url : String @ Region) (dest : Arena @ Region)] : I32
+  (+ 1 (mod (+ (* (host-hash (url-host url dest)) 31) (url-port url)) 33554393)))
+
+(defn as-find [(h : I32)] : I32
+  (loop [k 0]
+    (if (>= k 8)
+      -1
+      (if (= (slot-get (+ 4020 (* k 2))) h) k (recur (+ k 1))))))
+
+(defn as-put [(h : I32) (port : I32)] : I32
+  (let [e (as-find h)
+        k (if (>= e 0) e (mod (slot-get 4036) 8))]
+    (do (slot-set (+ 4020 (* k 2)) h)
+        (slot-set (+ 4021 (* k 2)) port)
+        (if (< e 0) (slot-set 4036 (+ (slot-get 4036) 1)) 0)
+        0)))
+
+(defn as-drop [(h : I32)] : I32
+  (let [k (as-find h)]
+    (if (>= k 0) (slot-set (+ 4020 (* k 2)) 0) 0)))
+
+;; 1 if buf has the (all-lowercase, every byte with bit 5 set: letters, '-', ':', ' ') pattern p at i,
+;; ignoring ASCII case in buf -- header names are case-insensitive (Alt-Svc / alt-svc)
+(defn match-ci-at [(buf : String @ Region) (i : I32) (p : String @ Region)] : I32
+  (let [pn (string/length p)]
+    (loop [k 0]
+      (if (>= k pn)
+        1
+        (if (= (bit-or (bit-and (string/char-at buf (+ i k)) 255) 32) (string/char-at p k))
+          (recur (+ k 1))
+          0)))))
+
+;; index just past "lt-svc: " (Alt-Svc / alt-svc) within buf[0..hend), or -1
+(defn find-altsvc [(buf : String @ Region) (hend : I32)] : I32
+  (loop [i 0]
+    (if (> (+ i 8) hend)
+      -1
+      (if (= (match-ci-at buf i "lt-svc: ") 1) (+ i 8) (recur (+ i 1))))))
+
+(defn digits-at [(buf : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [j i v 0]
+    (if (>= j e)
+      v
+      (let [c (string/char-at buf j)]
+        (if (and (>= c 48) (<= c 57)) (recur (+ j 1) (+ (* v 10) (- c 48))) v)))))
+
+;; port of the first host-less h3=":NNN" in the header line starting at a; 0 if none
+(defn altsvc-h3-port [(buf : String @ Region) (a : I32) (hend : I32)] : I32
+  (let [e (loop [k a] (if (>= k hend) hend (if (= (string/char-at buf k) 13) k (recur (+ k 1)))))]
+    (loop [i a]
+      (if (> (+ i 6) e)
+        0
+        (if (and (= (match-at buf i "h3=\"") 1) (= (string/char-at buf (+ i 4)) 58))
+          (digits-at buf (+ i 5) e)
+          (recur (+ i 1)))))))
+
+;; remember that this https origin speaks h3 (only learned from an https response)
+(defn note-alt-svc [(buf : String @ Region) (hend : I32) (dest : Arena @ Region)] : I32
+  (let [a (find-altsvc buf hend)
+        url (cururl-get)]
+    (if (or (< a 0) (= (url-https? url) 0))
+      0
+      (let [port (altsvc-h3-port buf a hend)]
+        (if (and (> port 0) (< port 65536))
+          (do (as-put (origin-key url dest) port)
+              (pg-log-n "alt-svc: h3 port " port dest))
+          0)))))
+
+(defn h3-wanted? [(url : String @ Region) (dest : Arena @ Region)] : I32
+  (cond
+    ((= (slot-get 1095) 1) 0)
+    ((= (slot-get 4011) 1) 1)
+    ((>= (as-find (origin-key url dest)) 0) 1)
+    (true 0)))
+
+(defn h3-teardown [] : I32
+  (if (= (slot-get 4010) 1)
+    (do (quic-close (quic-static-conn))
+        (slot-set 4010 0)
+        0)
+    0))
+
+(defn h3-abort [] : I32 (h3-teardown))
+
+(defn h3-failed [(st : I32) (dest : Arena @ Region)] : I32
+  (do (h3-teardown)
+      (pg-log-n "h3 FAILED status=" st dest)
+      (as-drop (origin-key (cururl-get) dest))
+      (if (= (slot-get 4011) 1)
+        (nav-fail (if (= st -3) 9 8) "http/3 failed")
+        (do (pg-log "h3: falling back to TCP+TLS")
+            (open-conn (cururl-get) dest)))))
+
+(defn h3-armed [(host : String @ Region) (port : I32) (dest : Arena @ Region)] : I32
+  (do (slot-set 4010 1)
+      (slot-set 6 1)
+      (slot-set 2 1)
+      (slot-set 4 -1)
+      (slot-set 5 -1)
+      (pg-log (string/concat "h3: connecting " (string/concat host (string/concat ":" (string/i32-to-string port dest) dest) dest) dest))
+      0))
+
+(defn h3-begin [(url : String @ Region) (dest : Arena @ Region)] : I32
+  (let [host (url-host url dest)
+        k (as-find (origin-key url dest))
+        port (if (and (>= k 0) (= (slot-get 4011) 0)) (slot-get (+ 4021 (* k 2))) (url-port url))
+        c (quic-connect-static host port 4194304 15000 dest)]
+    (if (= (bytes-len c) 0)
+      (h3-failed -6 dest)
+      (h3-armed host port dest))))
+
+;; one non-blocking step; its own scratch arena so a frame loop never grows the main one
+(defn h3-poll [] : I32
+  (with-arena [fr :region/scratch 8192]
+    (quic-pump (quic-static-conn) (url-host (cururl-get) &mut fr) (url-path (cururl-get) &mut fr))))
+
+(defn h3-done [(dest : Arena @ Region)] : I32
+  (let [c (quic-static-conn)
+        head (quic-headers-http1 c dest)
+        a (stream-append-bytes head 0 (bytes-len head))
+        b (stream-append-bytes c (quic-body-off c) (quic-body-len c))]
+    (if (or (< a 0) (< b 0))
+      (h3-failed -7 dest)
+      (do (pg-log-n "h3 ok; bytes=" (+ a b) dest)
+          (h3-teardown)
+          (slot-set 6 1)
+          (slot-set 2 1)
+          (slot-set 5 -1)
+          (check-headers dest)))))
+
+(defn pump-h3 [(dest : Arena @ Region)] : I32
+  (if (= (slot-get 4010) 1)
+    (let [st (h3-poll)]
+      (cond
+        ((= st 0) 0)
+        ((= st 1) (h3-done dest))
+        (true (h3-failed st dest))))
+    0))
+
 (defn nav-dispatch [(url : String @ Region) (dest : Arena @ Region)] : I32
   (cond
-    ((= (has-prefix url "https://") 1) (open-conn url dest))
+    ((= (has-prefix url "https://") 1)
+     (if (= (h3-wanted? url dest) 1) (h3-begin url dest) (open-conn url dest)))
     ((= (has-prefix url "http://") 1) (open-conn url dest))
     (true (nav-fail 3 "bad url"))))
 
@@ -4090,18 +4262,20 @@
 (defn start-nav [(url : String @ Region) (dest : Arena @ Region)] : I32
   (do
     (drop-conn dest)
+    (h3-abort)
+    (slot-set 4011 (h3-scheme? url))
     (stream-reset)
     (css-abort)
     (img-reset)
     (slot-set 622 0)
-    (cururl-set url)
+    (cururl-set (nav-url url dest))
     (slot-set 0 0)
     (slot-set 1 0)
     (slot-set 2 1)
     (slot-set 4 -1)
     (slot-set 5 -1)
     (slot-set 12 0)
-    (slot-set 26 (url-md? url))
+    (slot-set 26 (url-md? (nav-url url dest)))
     (slot-set 18 -1)
     (slot-set 10 (+ (slot-get 10) 1))
     (slot-set 1088 -1)
@@ -4109,7 +4283,7 @@
     (slot-set 638 0)
     (slot-set 1096 -1)
     (pg-log (string/concat "navigate " url dest))
-    (nav-then url (nav-dispatch url dest))))
+    (nav-then url (nav-dispatch (nav-url url dest) dest))))
 
 ;; the POST flag lives for one request: redirects (and any failure) go back to GET
 (defn nav-then [(url : String @ Region) (r : I32)] : I32
@@ -4147,9 +4321,17 @@
     ((= (string/char-at loc 0) 47) (string/concat (url-origin (cururl-get) dest) loc dest))
     (true loc)))
 
+;; a redirect inside an h3:// navigation to the SAME origin stays on HTTP/3 (the user asked for it)
+(defn h3-keep [(next : String @ Region) (dest : Arena @ Region)] : String
+  (if (and (= (slot-get 4011) 1)
+           (and (= (has-prefix next "https://") 1)
+                (string/str-eq? (url-origin next dest) (url-origin (cururl-get) dest))))
+    (string/concat "h3://" (string/substring next 8 (string/length next) dest) dest)
+    next))
+
 (defn follow [(next : String @ Region) (dest : Arena @ Region)] : I32
   (do (slot-set 7 (+ (slot-get 7) 1))
-      (start-nav next dest))) ; start-nav closes the stream being left
+      (start-nav (h3-keep next dest) dest))) ; start-nav closes the stream being left
 
 (defn redirect [(buf : String @ Region) (hend : I32) (dest : Arena @ Region)] : I32
   (let [a (find-location buf hend)]
@@ -4168,7 +4350,8 @@
 (defn on-headers [(hend : I32) (dest : Arena @ Region)] : I32
   (let [buf (stream-buf)
         code (status-code buf)
-        lg (pg-log-n "http status=" code dest)]
+        lg (pg-log-n "http status=" code dest)
+        as (note-alt-svc buf hend dest)]
     (if (and (>= code 301) (<= code 308))
       (redirect buf hend dest)
       0)))
@@ -5088,6 +5271,7 @@
         (if (= (handle-events dest) 1)
           (do (pg-log-n "quit; frames=" frames dest) frames)
           (let [p0 (smoke-hop frames limit dest)
+                ph (pump-h3 dest)
                 p1 (pump-net dest)
                 pc (css-pump page)
                 pi (img-pump)
@@ -5206,7 +5390,7 @@
             pre (if (and (= snav 1) (> sp 0))
                   (linebuf-append (string/substring arg (+ sp 1) (string/length arg) &mut a))
                   0)
-            isurl (has-prefix url "http")
+            isurl (if (= (has-prefix url "h3://") 1) 1 (has-prefix url "http"))
             fd (if (and (> (string/length url) 0) (not smoke) (= isurl 0)) (raw-open url 0) -1)
             page (if (>= fd 0) (raw-read-all fd &mut a) (embedded-page))
             n (string/length page)]

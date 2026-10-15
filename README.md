@@ -44,6 +44,25 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   a Linux bundle (binary + bundled libSDL2 + `cacert.pem` + `RUN.sh`) and a flat Windows zip
   (`pellegrino.exe` + `SDL2.dll` + `cacert.pem` + `RUN.bat`), plus a deterministic CONSTRUCT source snapshot.
 
+- **HTTP/3 over QUIC (v1.13):** `pellegrino h3://host/path` (or `:` then an `h3://` URL) fetches over QUIC v1 + TLS 1.3 + HTTP/3,
+  and plain `https://` is **upgraded automatically** once a response from that origin advertises
+  `Alt-Svc: h3=":port"`; any HTTP/3 failure (UDP blocked, no listener, bad handshake) falls back to TCP+TLS without
+  user action, and `h3://` shows an error page instead. The whole stack is PARENA (`net/quic_wire`, `net/h3_wire`
+  with QPACK+Huffman, `crypto/quic_crypto`, `net/quic_tls`, `net/quic_client`): mbedTLS has no QUIC hooks, so the TLS 1.3
+  client handshake and key schedule are PARENA, with only the primitives (AES-GCM, HMAC/SHA-256, X25519, x509 chain +
+  signature verification) delegated to mbedTLS/Monocypher. **Certificate chain and hostname verification are always on,
+  same trust roots as HTTPS, no bypass.** It is non-blocking (stepped from the frame loop, so the window keeps
+  repainting during the handshake and download) and, like the rest, uses no heap (one static connection block).
+  Verified against an independent implementation (aioquic) in the smoke suite -- explicit `h3://`, a redirect over
+  H3, untrusted and wrong-name certificates refused, a dead UDP port failing in milliseconds, Alt-Svc upgrade, and
+  Alt-Svc-to-a-dead-port falling back -- and by hand against live Cloudflare, Google, YouTube (950 KB) and
+  example.com. **Limits:** GET only (POST uses TCP), response body capped at 4 MiB (larger fails closed and
+  falls back), one connection at a time, sub-resources (images, stylesheets) still use TCP+TLS, no Retry/Version
+  Negotiation, 0-RTT, resumption, key update, congestion control or flow-control extension (the advertised window is
+  the body cap), QPACK static table only, x25519 + AES-128-GCM only. The Alt-Svc cache is per-process (not
+  persisted). The Windows build adds the same code and was **not** run on Windows (CI builds it; it is not
+  covered by the Wine smoke run for UDP).
+
 - **Hypertext (v1.1):** `<a href>` text is drawn blue + underlined and a left click navigates (absolute,
   root-relative, `//host`, and directory-relative targets). `#fragment` and non-http schemes (`mailto:`,
   `javascript:`) are ignored. **Keyboard:** Tab / Shift+Tab select the next / previous link (wraps; the
@@ -125,8 +144,8 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   `<q>` nesting quote styles, `<ruby>`, `<dialog>` modality.
 
 **Not built yet** (see [NORTHSTAR.md](NORTHSTAR.md))
-- HTTP/1.0 only (no chunked/keep-alive/compression), HTTP/2, HTTP/3/QUIC (mbedTLS has no QUIC hooks, so
-  that rung needs its own TLS answer), other image formats, fonts beyond the embedded bitmap
+- HTTP/1.0 only over TCP (no chunked/keep-alive/compression), HTTP/2 (HTTP/3 above is built; its limits are listed
+  there), other image formats, fonts beyond the embedded bitmap
   font. DNS, connect and the TLS handshake are blocking (5 s connect timeout, 10 s handshake cap), so the
   window does not repaint while one is in flight. No session resumption, no OCSP/CRL revocation checks.
 - The Windows exe is verified under Wine (winsock, bcrypt entropy, mbedTLS static heap all exercised), not
