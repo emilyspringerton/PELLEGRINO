@@ -602,7 +602,7 @@
     s))
 
 ;; UA element ids: 1-6 h1-h6, 7 p, 8 generic block, 9 li, 10 bold, 11 code, 12 em, 13 small, 14 big,
-;; 15 mark, 16 pre, 17 blockquote, 18 body/html, 19 font, 20 ul/ol, 0 plain inline
+;; 15 mark, 16 pre, 17 blockquote, 18 body/html, 19 font, 20 ul/ol, 21 hidden (template/svg/...), 23 dim (del/s), 0 plain inline
 (defn ua-id [(page : String @ Region) (a : I32) (b : I32)] : I32
   (cond
     ((= (word-eq page a b "h1") 1) 1)
@@ -644,6 +644,48 @@
     ((= (word-eq page a b "dl") 1) 8)
     ((= (word-eq page a b "dd") 1) 8)
     ((= (word-eq page a b "dt") 1) 8)
+    ((= (word-eq page a b "address") 1) 8)
+    ((= (word-eq page a b "figure") 1) 8)
+    ((= (word-eq page a b "figcaption") 1) 8)
+    ((= (word-eq page a b "fieldset") 1) 8)
+    ((= (word-eq page a b "legend") 1) 8)
+    ((= (word-eq page a b "details") 1) 8)
+    ((= (word-eq page a b "summary") 1) 8)
+    ((= (word-eq page a b "hgroup") 1) 8)
+    ((= (word-eq page a b "menu") 1) 8)
+    ((= (word-eq page a b "dir") 1) 8)
+    ((= (word-eq page a b "center") 1) 8)
+    ((= (word-eq page a b "caption") 1) 8)
+    ((= (word-eq page a b "thead") 1) 8)
+    ((= (word-eq page a b "tbody") 1) 8)
+    ((= (word-eq page a b "tfoot") 1) 8)
+    ((= (word-eq page a b "search") 1) 8)
+    ((= (word-eq page a b "optgroup") 1) 8)
+    ((= (word-eq page a b "option") 1) 8)
+    ((= (word-eq page a b "dialog") 1) 8)
+    ((= (word-eq page a b "template") 1) 21)
+    ((= (word-eq page a b "datalist") 1) 21)
+    ((= (word-eq page a b "noembed") 1) 21)
+    ((= (word-eq page a b "svg") 1) 21)
+    ((= (word-eq page a b "math") 1) 21)
+    ((= (word-eq page a b "iframe") 1) 21)
+    ((= (word-eq page a b "map") 1) 21)
+    ((= (word-eq page a b "area") 1) 21)
+    ((= (word-eq page a b "source") 1) 21)
+    ((= (word-eq page a b "track") 1) 21)
+    ((= (word-eq page a b "param") 1) 21)
+    ((= (word-eq page a b "object") 1) 21)
+    ((= (word-eq page a b "embed") 1) 21)
+    ((= (word-eq page a b "del") 1) 23)
+    ((= (word-eq page a b "s") 1) 23)
+    ((= (word-eq page a b "strike") 1) 23)
+    ((= (word-eq page a b "cite") 1) 12)
+    ((= (word-eq page a b "dfn") 1) 12)
+    ((= (word-eq page a b "var") 1) 12)
+    ((= (word-eq page a b "samp") 1) 11)
+    ((= (word-eq page a b "sub") 1) 13)
+    ((= (word-eq page a b "sup") 1) 13)
+    ((= (word-eq page a b "th") 1) 10)
     (true 0)))
 
 (defn ua-block? [(ua : I32)] : I32
@@ -659,6 +701,12 @@
     ((= (word-eq page a b "input") 1) 1)
     ((= (word-eq page a b "base") 1) 1)
     ((= (word-eq page a b "wbr") 1) 1)
+    ((= (word-eq page a b "area") 1) 1)
+    ((= (word-eq page a b "source") 1) 1)
+    ((= (word-eq page a b "track") 1) 1)
+    ((= (word-eq page a b "param") 1) 1)
+    ((= (word-eq page a b "embed") 1) 1)
+    ((= (word-eq page a b "col") 1) 1)
     (true 0)))
 
 ;; tag at page[lt..gt]: -1 closer, +1 opener that needs a closer, 0 comment/void/self-closing
@@ -722,6 +770,8 @@
     ((= ua 16) (ua-pre))
     ((= ua 17) (ua-quote))
     ((= ua 20) (tset 15 12))
+    ((= ua 21) (tset 10 1))
+    ((= ua 23) (tset 1 8421504))
     (true 0)))
 
 ;; ---- author CSS ----
@@ -1594,6 +1644,12 @@
 (defn form-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
   (do (fm-form-open) (push-styled page ns ne te)))
 
+(defn cell-gap [] : I32
+  (if (> (slot-get 32) (tget 6)) (put-char 32 0 1000 -1 -1 -1) 0))
+
+(defn cell-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (do (cell-gap) (push-styled page ns ne te)))
+
 (defn open-named [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
   (cond
     ((= (word-eq page ns ne "br") 1) (do-br))
@@ -1606,6 +1662,9 @@
     ((= (word-eq page ns ne "form") 1) (form-open page ns ne te))
     ((= (word-eq page ns ne "base") 1) 0)
     ((= (word-eq page ns ne "wbr") 1) 0)
+    ((= (void-tag? page ns ne) 1) 0)
+    ((= (string/char-at page (- te 1)) 47) 0)
+    ((or (= (word-eq page ns ne "td") 1) (= (word-eq page ns ne "th") 1)) (cell-open page ns ne te))
     (true (push-styled page ns ne te))))
 
 ;; <name ...> at i: apply it (only once its closing '>' has arrived)

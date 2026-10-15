@@ -90,6 +90,16 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   `<html>`'s background, else `<body>`'s. Verified live over plain HTTP under Xvfb; the HTTPS form path is the same
   code but untested here.
 
+- **HTML5 element coverage (v1.7):** every HTML5 element is recognised and none leaks its tag or leaves the layout
+  unbalanced. Blocks: `p div section article header footer nav main aside address figure figcaption fieldset legend
+  details summary hgroup menu search dialog table thead tbody tfoot tr caption dl dt dd ...`; `<br>`/`<wbr>`/`<hr>` and
+  all void elements (`area source track param embed col ...`) and `<x/>` self-closers; `<th>`/`<td>` are inline cells
+  (a space between them; **no table grid**); `sub/sup` draw small, `del/s/strike` dim, `cite/dfn/var` emphasis,
+  `samp/kbd/code` code, `mark` highlighted; `template svg math iframe object embed map datalist noembed` are hidden
+  (hidden blocks can still leave a stray blank row); `video/audio/canvas/noscript` show their fallback text.
+  Not drawn: `u`/`ins`/`s` underline/strike lines, `<q>` quote marks, `<details>` toggling (always open), real tables,
+  `<textarea>`/`<select>`/`<progress>`/`<meter>` widgets.
+
 **Not built yet** (see [NORTHSTAR.md](NORTHSTAR.md))
 - HTTP/1.0 only (no chunked/keep-alive/compression), HTTP/2, HTTP/3/QUIC (mbedTLS has no QUIC hooks, so
   that rung needs its own TLS answer), other image formats, fonts beyond the embedded bitmap

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-15 (v1.7 -- HTML5 element coverage)
+- Every HTML5 element gets a sensible UA default: ~20 more block elements, void/self-closing elements no longer leak a
+  style-stack entry, hidden-by-default elements (`template svg math iframe object embed map datalist noembed`),
+  `sub/sup/del/s/cite/dfn/var/samp/th` styling, `td/th` separated by a space. `<br>` unchanged. README updated.
+  Smoke sections 1, 15-19 pass; checked by screenshot.
+
 ## 2026-10-15 (v1.6 -- forms, POST, entities, scroll keys, window move)
 - **Forms**: `<form>` + `<input>` (text/search/email/...; password masked; hidden; checkbox; radio groups; submit/
   button/reset-as-button) and `<button>`. Click a field to focus it, type (SDL text input), Backspace, Enter submits,
