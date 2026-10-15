@@ -44,13 +44,15 @@
     (+ (* 16 (hexv (string/char-at f off))) (hexv (string/char-at f (+ off 1))))))
 
 (defn pg-log [(msg : String @ Region)] : I32
-  (let [fd (raw-open "pellegrino.log" 2)]
-    (if (< fd 0)
-      -1
-      (do (raw-write fd msg)
-          (raw-write fd "\n")
-          (raw-close fd)
-          0))))
+  (if (= (slot-get 4000) 1)
+    0
+    (let [fd (raw-open "pellegrino.log" 2)]
+      (if (< fd 0)
+        -1
+        (do (raw-write fd msg)
+            (raw-write fd "\n")
+            (raw-close fd)
+            0)))))
 
 (defn pg-log-n [(label : String @ Region) (n : I32) (dest : Arena @ Region)] : I32
   (pg-log (string/concat label (string/i32-to-string n dest) dest)))
