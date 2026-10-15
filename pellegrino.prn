@@ -99,6 +99,21 @@
       1
       (if (= (match-at page i "<style") 1) 1 0))))
 
+;; end of a skipped element's content: only the element's own closer. A script body is full of `</div>` inside
+;; template literals and strings; stopping at any `</` leaked the rest of the script onto the page (found
+;; dogfooding MIXFORGE's dj.html, 2026-10-15).
+(defn skip-end? [(page : String @ Region) (i : I32)] : I32
+  (if (and (= (string/char-at page i) 60) (= (string/char-at page (+ i 1)) 47))
+    (if (or (= (match-at page i "</script") 1)
+            (or (= (match-at page i "</style") 1)
+                (or (= (match-at page i "</title") 1)
+                    (or (= (match-at page i "</SCRIPT") 1)
+                        (or (= (match-at page i "</STYLE") 1)
+                            (= (match-at page i "</TITLE") 1))))))
+      1
+      0)
+    0))
+
 ;; index of the byte after `href=<quote>` inside the <a ...> tag opened at i (bounded by lim), else -1
 (defn href-start [(page : String @ Region) (i : I32) (lim : I32)] : I32
   (loop [k (+ i 2)]
@@ -1047,6 +1062,30 @@
   (if (and (> (+ (slot-get 32) cw) (tget 23)) (> (slot-get 32) (tget 6)))
     (next-line)
     0))
+
+;; word wrap (v1.12, found dogfooding MIXFORGE: paragraphs broke mid-word, "compu|ted"): before the first character of a
+;; word in an HTML document, start a new line if the whole word will not fit and a line of its own would hold it.
+;; Length is counted in raw bytes up to whitespace or '<' (an entity over-counts, which only wraps early).
+;; a collapsed space that would start the next line is the line break itself: wrap and drop it (no leading space)
+(defn space-wraps? [] : I32
+  (if (and (> (+ (slot-get 32) (* 6 (tget 3))) (tget 23)) (> (slot-get 32) (tget 6))) 1 0))
+
+(defn word-len [(page : String @ Region) (i : I32) (lim : I32)] : I32
+  (loop [k i]
+    (if (or (>= k lim) (>= (- k i) 80))
+      (- k i)
+      (let [c (string/char-at page k)]
+        (if (or (<= c 32) (= c 60)) (- k i) (recur (+ k 1)))))))
+
+(defn word-wrap [(page : String @ Region) (i : I32) (lim : I32)] : I32
+  (let [p (if (> i 0) (string/char-at page (- i 1)) 32)]
+    (if (and (= (soft-ws?) 1) (or (<= p 32) (= p 62)))
+      (let [n (* (word-len page i lim) (* 6 (tget 3)))
+            x (slot-get 32)]
+        (if (and (> (+ x n) (tget 23)) (and (> x (tget 6)) (<= n (- (tget 23) (tget 6)))))
+          (next-line)
+          0))
+      0)))
 
 (defn do-clear-nl [] : I32
   (do (slot-set 635 0) (slot-set 636 0) 0))
@@ -3631,6 +3670,12 @@
     ((= cp 8212) 1007)
     ((= cp 8230) 1001)
     ((= cp 169) 1002)
+    ((= cp 177) 1013)
+    ((= cp 176) 111)
+    ((= cp 178) 50)
+    ((= cp 179) 51)
+    ((= cp 181) 117)
+    ((= cp 247) 47)
     ((= cp 8482) 1003)
     ((= cp 174) 1004)
     ((= cp 8226) 42)
@@ -3760,6 +3805,7 @@
     ((= code 1007) (put-lit 45 45 0))
     ((= code 1011) (put-lit 45 62 0))
     ((= code 1012) (put-lit 60 45 0))
+    ((= code 1013) (put-lit 43 47 45))
     (true 0)))
 
 (defn draw-page [(ren : I32) (page : String @ Region) (start : I32) (revealed : I32) (scroll : I32)
@@ -3773,7 +3819,7 @@
             ((= tag 1) (recur (+ i 1) (if (= c 62) 0 1) hs he ln))
             ((= tag 4) (recur (+ i 1) (if (= c 62) 2 4) hs he ln))
             ((= tag 2)
-             (if (and (= c 60) (= (string/char-at page (+ i 1)) 47))
+             (if (= (skip-end? page i) 1)
                (recur (+ i 1) 1 hs he ln)
                (recur (+ i 1) 2 hs he ln)))
             ((= tag 5)
@@ -3795,7 +3841,7 @@
                  ((= k 5) (let [t (close-tag page i revealed)] (recur (+ i 1) 1 hs he ln)))
                  (true (let [t (open-tag page i revealed)] (recur (+ i 1) 1 hs he ln))))))
             ((and (or (= c 10) (or (= c 32) (= c 9))) (= (soft-ws?) 1))
-             (let [p (if (= (soft-skip? page i) 1) 0 (put-char 32 i revealed hs he (- ln 1)))
+             (let [p (cond ((= (soft-skip? page i) 1) 0) ((= (space-wraps?) 1) (next-line)) (true (put-char 32 i revealed hs he (- ln 1))))
                    q (if (= c 10) (md-pop-line) 0)]
                (recur (+ i 1) 0 hs he ln)))
             ((= c 10) (let [t (do-newline)] (recur (+ i 1) 0 hs he ln)))
@@ -3808,7 +3854,8 @@
              (let [k (md-kind page i start revealed hs)]
                (cond
                  ((= k 0)
-                  (let [p (put-char c i revealed hs he (- ln 1))] (recur (+ i 1) 0 hs he ln)))
+                  (let [w (word-wrap page i revealed)
+                        p (put-char c i revealed hs he (- ln 1))] (recur (+ i 1) 0 hs he ln)))
                  ((>= k 11)
                   (let [p (md-heading (- k 10))] (recur (+ i (+ (- k 10) 1)) 0 hs he ln)))
                  ((= k 2) (let [p (md-bullet revealed)] (recur (+ i 2) 0 hs he ln)))

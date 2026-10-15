@@ -4,6 +4,7 @@
 #include "pellegrino_gen.inc"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static int fails = 0;
 #define CHECK(c, msg) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", msg); fails++; } else printf("ok: %s\n", msg); } while (0)
@@ -55,6 +56,19 @@ int main(int argc, char **argv) {
     CHECK(embed_action_start() >= 0, "Tab+Enter activates a link");
     embed_ack();
     embed_draw(ren, page, n, W, H, 1);
+    /* a script body full of "</div>" must not leak onto the page (found dogfooding MIXFORGE dj.html) */
+    {
+        char pa[] = "<html><body><p>hi</p></body></html>";
+        char pb[] = "<html><body><p>hi</p><script>const a = `<div>${v}</div>`; if (a < 3) { x = \"</p>\"; }</script></body></html>";
+        unsigned *fa = (unsigned *)malloc((size_t)W * H * 4);
+        embed_init(W, H);
+        embed_draw(ren, pa, (int)strlen(pa), W, H, 1);
+        memcpy(fa, px, (size_t)W * H * 4);
+        embed_init(W, H);
+        embed_draw(ren, pb, (int)strlen(pb), W, H, 1);
+        CHECK(memcmp(fa, px, (size_t)W * H * 4) == 0, "script body with </div> inside does not leak onto the page");
+        free(fa);
+    }
     FILE *f = fopen(out, "wb");
     if (f) {
         fprintf(f, "P6\n%d %d\n255\n", W, H);

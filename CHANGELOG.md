@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-15 (v1.12 -- dogfooding MIXFORGE, kanban #637)
+- Rendered MIXFORGE's `web/dj.html` and `web/multiplayer.html` (file argument, headless Xvfb screenshots) and fixed what broke:
+  - **A `<script>` body no longer leaks onto the page.** Skipped content ended at the first `</` of any kind, so a
+    template literal containing `</div>` dumped the rest of the script as text. It now ends only at `</script`,
+    `</style` or `</title` (either case). Regression check in `tests/embed_test.c`.
+  - **Word wrap.** Paragraphs broke mid-word ("compu|ted"). Before a word's first character in an HTML document the
+    line breaks if the whole word will not fit and a fresh line would hold it; a collapsed space that would start a
+    line is the break (no leading space). `<pre>`, plain text and markdown keep the old per-character wrap.
+  - UTF-8 `±`, `°`, `²`, `³`, `µ`, `÷` render as ASCII look-alikes instead of `?`.
+- Still not working on those pages, by design of the pages: the decks/pads are built by JavaScript at load time, and
+  PELLEGRINO has no JS yet (PARENA's `stdlib/v16` engine exists but is not wired in). `<input type=range>` shows as a
+  text box with its value. Verified by eye in screenshots only; the full Bazel smoke suite was NOT re-run.
+
 ## 2026-10-15 (v1.11 -- embed API)
 - Kanban #627 (SHANKPIT OS menu on basic HTML/CSS + PELLEGRINO rendering). `pellegrino.prn` gains an **embed API**
   so a host that owns its own window/event loop can use the layout + paint engine as a library: `embed-open w h`
