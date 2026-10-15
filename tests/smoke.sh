@@ -14,6 +14,8 @@
 #  12. TLS truncation                  a stream cut without close_notify is flagged, never shown as complete
 #  13. refused connect fails fast      a closed port must not cost the 5 s connect timeout (Winsock reports a
 #                                      failed non-blocking connect via exceptfds, not writefds)
+#  15. hypertext                      <a href> clicks: root-relative, directory-relative, and the ignored kinds
+#                                      (#fragment, mailto:)
 #  14. bundle beside the exe           (Windows/Wine only: PELLEGRINO_WINE + PELLEGRINO_EXE_DIR) cacert.pem next
 #                                      to the exe is found even when its directory is not ANSI-representable
 set -euo pipefail
@@ -146,6 +148,24 @@ run "--smoke-url=http://127.0.0.1:$CLOSED/"; B2=$(ms)
 need "connect FAILED"
 EXTRA=$(( (B2 - B1) - (B1 - B0) ))
 [ "$EXTRA" -lt 3000 ] || { echo "FAIL: refused connect took ${EXTRA} ms longer than an idle run (connect timeout?)"; cat pellegrino.log; exit 1; }
+
+echo "== 15. hypertext: clicking a link navigates (synthetic click on the page's first cell)"
+mkdir -p www/dir
+printf '<a href="/index.html">root-relative</a> then some text\n' > www/link_abs.html
+printf '<a href="sib.html">dir-relative</a>\n' > www/dir/link_rel.html
+printf '<p>sibling arrived</p>\n' > www/dir/sib.html
+printf '<a href="mailto:a@b.example">mail</a>\n' > www/link_mail.html
+printf '<a href="#top">frag</a>\n' > www/link_frag.html
+run "--smoke-click=http://127.0.0.1:$PORT/link_abs.html"
+for n in "smoke-click:" "link click: http://127.0.0.1:$PORT/index.html" "navigate http://127.0.0.1:$PORT/index.html" "clean exit"; do need "$n"; done
+run "--smoke-click=http://127.0.0.1:$PORT/dir/link_rel.html"
+for n in "link click: http://127.0.0.1:$PORT/dir/sib.html" "navigate http://127.0.0.1:$PORT/dir/sib.html" "clean exit"; do need "$n"; done
+for f in link_mail link_frag; do
+  run "--smoke-click=http://127.0.0.1:$PORT/$f.html"
+  need "smoke-click:"; need "clean exit"
+  absent "link click:"   # not navigable: ignored, the page stays put
+  [ "$(grep -c '^navigate ' pellegrino.log)" -eq 1 ] || { echo "FAIL: $f navigated"; cat pellegrino.log; exit 1; }
+done
 
 if [ -n "${PELLEGRINO_WINE:-}" ] && [ -d "${PELLEGRINO_EXE_DIR:-/nonexistent}" ]; then
   echo "== 14. cacert.pem beside the exe, directory name not representable in the ANSI code page"

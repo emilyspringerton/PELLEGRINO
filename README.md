@@ -44,9 +44,15 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   a Linux bundle (binary + bundled libSDL2 + `cacert.pem` + `RUN.sh`) and a flat Windows zip
   (`pellegrino.exe` + `SDL2.dll` + `cacert.pem` + `RUN.bat`), plus a deterministic CONSTRUCT source snapshot.
 
+- **Hypertext (v1.1):** `<a href>` text is drawn blue + underlined and a left click navigates (absolute,
+  root-relative, `//host`, and directory-relative targets). `#fragment` and non-http schemes (`mailto:`,
+  `javascript:`) are ignored. Not yet: `../` dot-segment normalisation (left to the server), link hover/cursor,
+  keyboard link selection, back/forward history, `<base href>`, `target=`. Hit-testing is cell-based and the
+  link colour is not yet verified by eye (no screenshot tool on the build box).
+
 **Not built yet** (see [NORTHSTAR.md](NORTHSTAR.md))
 - HTTP/1.0 only (no chunked/keep-alive/compression), HTTP/2, HTTP/3/QUIC (mbedTLS has no QUIC hooks, so
-  that rung needs its own TLS answer), links/clicking, CSS, images, fonts beyond the embedded bitmap
+  that rung needs its own TLS answer), CSS, images, fonts beyond the embedded bitmap
   font. DNS, connect and the TLS handshake are blocking (5 s connect timeout, 10 s handshake cap), so the
   window does not repaint while one is in flight. No session resumption, no OCSP/CRL revocation checks.
 - The Windows exe is verified under Wine (winsock, bcrypt entropy, mbedTLS static heap all exercised), not

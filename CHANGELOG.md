@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-15 (v1.1 — hypertext)
+- **Links are clickable.** `<a href="..">` text is blue + underlined; a left click navigates. Targets resolve
+  absolute / `/root` / `//host` / directory-relative against the current URL; `#frag` and non-http schemes are ignored.
+- The href is copied out of the stream buffer before navigating (start-nav resets that buffer).
+- New smoke hook `--smoke-click=URL` (synthetic click on the first cell at frame 60) and smoke section 15.
+- Verified locally with a TLS-less build against a local server; the full suite (needs mbedTLS/Bazel) not run on this box.
+
 ## 2026-10-14 (v0.4 — HTTPS)
 - **HTTPS**: `https://` URLs and http->https redirects work. mbedTLS 3.6.7 (pinned by sha256, built from
   source with a static-heap user config: no malloc), TLS 1.3 + 1.2, chain **and hostname always verified**;

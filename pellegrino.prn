@@ -10,7 +10,9 @@
 ;; page, or a file path argument), tags are stripped, layout is a drifting cursor over a cell grid,
 ;; glyphs are drawn from an embedded 5x8 bitmap font via filled rects. Newly arrived bytes are
 ;; tinted (the packet visualizer vibe) and a loading-horizon line tracks the stream front.
-;; Not yet: HTTP/2/3, chunked/keep-alive, CSS, images, links. See NORTHSTAR.md.
+;; v1.1: hypertext. <a href> text is drawn blue + underlined; a left click on a link navigates to its
+;; (absolute, root-relative, scheme-relative or directory-relative) target. #fragments and non-http
+;; schemes (mailto:, javascript:, ...) are ignored. Not yet: HTTP/2/3, chunked/keep-alive, CSS, images.
 
 (module pellegrino)
 (import string)
@@ -90,6 +92,53 @@
       1
       (if (= (match-at page i "<style") 1) 1 0))))
 
+;; ---- hypertext ----
+;; tag kind at '<' (index i): 0 other, 1 skipped element, 2 line break, 3 <a ...>, 4 </a>
+(defn tag-kind [(page : String @ Region) (i : I32)] : I32
+  (let [c1 (string/char-at page (+ i 1))
+        c2 (string/char-at page (+ i 2))]
+    (cond
+      ((= (skip-elem? page i) 1) 1)
+      ((and (or (= c1 97) (= c1 65)) (or (= c2 32) (= c2 10) (= c2 9) (= c2 13))) 3)
+      ((and (= c1 47) (or (= c2 97) (= c2 65))) 4)
+      ((= (breaks? page i) 1) 2)
+      (true 0))))
+
+;; index of the byte after `href=<quote>` inside the <a ...> tag opened at i (bounded by lim), else -1
+(defn href-start [(page : String @ Region) (i : I32) (lim : I32)] : I32
+  (loop [k (+ i 2)]
+    (if (>= (+ k 6) lim)
+      -1
+      (let [c (string/char-at page k)]
+        (cond
+          ((= c 62) -1)
+          ((and (or (= (match-at page k "href=") 1) (= (match-at page k "HREF=") 1))
+                (or (= (string/char-at page (+ k 5)) 34) (= (string/char-at page (+ k 5)) 39)))
+           (+ k 6))
+          (true (recur (+ k 1))))))))
+
+;; index of the closing quote of the href value starting at s, else -1 (value not fully arrived yet)
+(defn href-end [(page : String @ Region) (s : I32) (lim : I32)] : I32
+  (let [q (string/char-at page (- s 1))]
+    (loop [k s]
+      (if (>= k lim)
+        -1
+        (if (= (string/char-at page k) q) k (recur (+ k 1)))))))
+
+;; link cell: blue glyph + underline; if the pending click lies inside this cell, remember the href range
+(defn link-hit [(px : I32) (py : I32) (hs : I32) (he : I32)] : I32
+  (if (and (>= (slot-get 13) px) (< (slot-get 13) (+ px 12)) (>= (slot-get 14) py) (< (slot-get 14) (+ py 18)))
+    (do (slot-set 15 hs) (slot-set 16 he) 0)
+    0))
+
+(defn draw-link [(ren : I32) (c : I32) (vis : Bool) (px : I32) (py : I32) (hs : I32) (he : I32)] : I32
+  (if vis
+    (do (sdl2-raw-set-draw-color ren 96 165 250 255)
+        (draw-glyph ren c px py 2)
+        (sdl2-raw-render-fill-rect ren px (+ py 17) 12 1)
+        (link-hit px py hs he))
+    0))
+
 (defn draw-cell [(ren : I32) (c : I32) (i : I32) (revealed : I32) (vis : Bool) (px : I32) (py : I32)] : I32
   (if vis
     (do (if (and (= (slot-get 11) 1) (< (- revealed i) 160))
@@ -100,39 +149,48 @@
 
 (defn draw-page [(ren : I32) (page : String @ Region) (start : I32) (revealed : I32) (scroll : I32)
                  (cols : I32) (rows : I32) (x0 : I32) (y0 : I32)] : I32
-  (loop [i start col 0 row 0 tag 0]
+  (loop [i start col 0 row 0 tag 0 hs -1 he -1]
     (if (>= i revealed)
       row
       (let [c (string/char-at page i)]
         (cond
           ((= tag 1)
-           (recur (+ i 1) col row (if (= c 62) 0 1)))
+           (recur (+ i 1) col row (if (= c 62) 0 1) hs he))
           ((= tag 4)
-           (recur (+ i 1) col row (if (= c 62) 2 4)))
+           (recur (+ i 1) col row (if (= c 62) 2 4) hs he))
           ((= tag 2)
            (if (and (= c 60) (= (string/char-at page (+ i 1)) 47))
-             (recur (+ i 1) col row 1)
-             (recur (+ i 1) col row 2)))
+             (recur (+ i 1) col row 1 hs he)
+             (recur (+ i 1) col row 2 hs he)))
           ((= c 60)
-           (if (= (skip-elem? page i) 1)
-             (recur (+ i 1) col row 4)
-             (if (breaks? page i)
-               (recur (+ i 1) 0 (if (> col 0) (+ row 1) row) 1)
-               (recur (+ i 1) col row 1))))
-          ((= c 10) (recur (+ i 1) 0 (+ row 1) 0))
-          ((= c 13) (recur (+ i 1) col row 0))
+           (let [k (tag-kind page i)]
+             (cond
+               ((= k 1) (recur (+ i 1) col row 4 hs he))
+               ((= k 2) (recur (+ i 1) 0 (if (> col 0) (+ row 1) row) 1 hs he))
+               ((= k 3)
+                (let [s (href-start page i revealed)
+                      e (if (< s 0) -1 (href-end page s revealed))]
+                  (recur (+ i 1) col row 1 (if (< e 0) -1 s) e)))
+               ((= k 4) (recur (+ i 1) col row 1 -1 -1))
+               (true (recur (+ i 1) col row 1 hs he)))))
+          ((= c 10) (recur (+ i 1) 0 (+ row 1) 0 hs he))
+          ((= c 13) (recur (+ i 1) col row 0 hs he))
           (true
            (let [wrap (>= col cols)
                  r (if wrap (+ row 1) row)
                  cc (if wrap 0 col)
                  vis (and (>= r scroll) (< r (+ scroll rows)))]
-             (do (draw-cell ren c i revealed vis (+ x0 (* cc 12)) (+ y0 (* (- r scroll) 18)))
-                 (recur (+ i 1) (+ cc 1) r 0)))))))))
+             (do (if (>= hs 0)
+                   (draw-link ren c vis (+ x0 (* cc 12)) (+ y0 (* (- r scroll) 18)) hs he)
+                   (draw-cell ren c i revealed vis (+ x0 (* cc 12)) (+ y0 (* (- r scroll) 18))))
+                 (recur (+ i 1) (+ cc 1) r 0 hs he)))))))))
 
 ;; ===================== navigation, state (slots) and the frame loop =====================
 ;; slot 0 revealed (src 0 only)  1 scroll  2 dirty  3 mode (0 view, 1 typing a URL)
 ;; slot 4 socket fd (-1 none)    5 body start in stream buf (-1 until headers seen)   10 navigation generation
 ;; slot 6 src (0 file/embedded page, 1 live stream, 3 error page)   7 redirects   8 error code
+;; slot 13/14 pending click (px x/y, -1 none)   15/16 href [start,end) of the link under it (-1 none)
+;; slot 17 smoke: synthesize a click at frame 60
 (defn embedded-page [] : String
   "<h1>PELLEGRINO v1</h1>
 <p>all gas; no brakes; powered by PARENA.</p>
@@ -522,6 +580,79 @@
         tx (draw-status ren win-w win-h)]
     (do (sdl2-raw-render-present ren) 0)))
 
+;; ---- following links ----
+;; first '?' or '#' at/after the host, else the length
+(defn path-end [(url : String @ Region)] : I32
+  (let [n (string/length url)]
+    (loop [i (host-end url)]
+      (if (>= i n)
+        n
+        (let [c (string/char-at url i)]
+          (if (or (= c 63) (= c 35)) i (recur (+ i 1))))))))
+
+;; directory of url, with trailing '/': everything up to the last '/' of the path (origin + "/" if none)
+(defn url-dir [(url : String @ Region) (dest : Arena @ Region)] : String
+  (let [he (host-end url)
+        pe (path-end url)
+        ls (loop [i (- pe 1)]
+             (if (< i he)
+               -1
+               (if (= (string/char-at url i) 47) i (recur (- i 1)))))]
+    (if (< ls 0)
+      (string/concat (string/substring url 0 he dest) "/" dest)
+      (string/substring url 0 (+ ls 1) dest))))
+
+;; 1 if h is a non-http scheme ("mailto:...", "javascript:...") -- a ':' before any '/', '?' or '#'
+(defn other-scheme? [(h : String @ Region)] : I32
+  (let [n (string/length h)]
+    (loop [i 0]
+      (if (>= i n)
+        0
+        (let [c (string/char-at h i)]
+          (cond
+            ((= c 58) 1)
+            ((or (= c 47) (= c 63) (= c 35)) 0)
+            (true (recur (+ i 1)))))))))
+
+;; absolute http(s) URL for an href as written in the page; "" when it is not navigable
+(defn resolve-href [(h : String @ Region) (dest : Arena @ Region)] : String
+  (cond
+    ((= (string/length h) 0) "")
+    ((= (string/char-at h 0) 35) "")
+    ((= (has-prefix h "https://") 1) h)
+    ((= (has-prefix h "http://") 1) h)
+    ((= (has-prefix (cururl-get) "http") 0) "")
+    ((= (has-prefix h "//") 1) (absolutize h dest))
+    ((= (string/char-at h 0) 47) (absolutize h dest))
+    ((= (other-scheme? h) 1) "")
+    (true (string/concat (url-dir (cururl-get) dest) h dest))))
+
+;; the href text is copied out of the page buffer first: start-nav resets that buffer
+(defn go-link [(target : String @ Region) (dest : Arena @ Region)] : I32
+  (if (> (string/length target) 0)
+    (do (pg-log (string/concat "link click: " target dest))
+        (slot-set 7 0)
+        (start-nav target dest))
+    0))
+
+(defn follow-link [(page : String @ Region) (dest : Arena @ Region)] : I32
+  (let [h (string/substring (cur-page page) (slot-get 15) (slot-get 16) dest)]
+    (go-link (resolve-href h dest) dest)))
+
+(defn clear-click [] : I32
+  (do (slot-set 13 -1) (slot-set 14 -1) (slot-set 15 -1) (slot-set 16 -1) 0))
+
+;; called right after a frame was drawn: the draw pass filled slots 15/16 if the click landed on a link
+(defn resolve-click [(page : String @ Region) (dest : Arena @ Region)] : I32
+  (if (>= (slot-get 15) 0)
+    (let [r (follow-link page dest)] (clear-click))
+    (clear-click)))
+
+(defn on-click [(x : I32) (y : I32)] : I32
+  (if (= (slot-get 3) 1)
+    0
+    (do (slot-set 13 x) (slot-set 14 y) (slot-set 15 -1) (slot-set 2 1) 0)))
+
 ;; ---- input ----
 (defn go-url [(dest : Arena @ Region)] : I32
   (do (slot-set 3 0)
@@ -588,6 +719,7 @@
         ((= ev 1) 1)
         ((= ev 2) (if (= (on-key (sdl2-raw-last-event-key) dest) 1) 1 (recur 0)))
         ((= ev 3) (let [x (on-text (sdl2-raw-last-event-text dest))] (recur 0)))
+        ((= ev 5) (let [x (on-click (mouse-x) (mouse-y))] (recur 0)))
         ((= ev 9) (let [x (on-wheel (sdl2-raw-last-event-wheel-delta))] (recur 0)))
         (true (recur 0))))))
 
@@ -612,10 +744,15 @@
   (do (pg-log "smoke-nav: address-bar navigation")
       (go-url dest)))
 
+(defn smoke-click [] : I32
+  (do (pg-log "smoke-click: synthetic click on the first cell")
+      (on-click 14 14)))
+
 (defn smoke-hop [(frames : I32) (limit : I32) (dest : Arena @ Region)] : I32
-  (if (and (> limit 0) (= frames 20) (> (linebuf-len) 0))
-    (hop dest)
-    0))
+  (cond
+    ((and (> limit 0) (= frames 20) (> (linebuf-len) 0)) (hop dest))
+    ((and (> limit 0) (= frames 60) (= (slot-get 17) 1)) (smoke-click))
+    (true 0)))
 
 (defn frame-loop [(ren : I32) (page : String @ Region) (n : I32) (win-w : I32) (win-h : I32)
                   (limit : I32) (dest : Arena @ Region)] : I32
@@ -629,7 +766,8 @@
           (let [p0 (smoke-hop frames limit dest)
                 p1 (pump-net dest)
                 p2 (pump-static n)
-                p3 (present-or-wait ren page n cols rows win-w win-h)]
+                p3 (present-or-wait ren page n cols rows win-w win-h)
+                p4 (resolve-click page dest)]
             (recur (+ frames 1))))))))
 
 (defn pellegrino-run [(arg : String @ Region)] : I32
@@ -639,10 +777,13 @@
       (let [smoke (string/str-eq? arg "--smoke")
             surl (has-prefix arg "--smoke-url=")
             snav (has-prefix arg "--smoke-nav=")
+            sclk (has-prefix arg "--smoke-click=")
             sp (if (= snav 1) (find-char arg 32 12) -1)
-            url (if (= surl 1)
-                  (string/substring arg 12 (string/length arg) &mut a)
-                  (if (and (= snav 1) (> sp 0)) (string/substring arg 12 sp &mut a) arg))
+            url (cond
+                  ((= surl 1) (string/substring arg 12 (string/length arg) &mut a))
+                  ((= sclk 1) (string/substring arg 14 (string/length arg) &mut a))
+                  ((and (= snav 1) (> sp 0)) (string/substring arg 12 sp &mut a))
+                  (true arg))
             pre (if (and (= snav 1) (> sp 0))
                   (linebuf-append (string/substring arg (+ sp 1) (string/length arg) &mut a))
                   0)
@@ -665,8 +806,10 @@
                     (do (pg-log "renderer create FAILED") 3)
                     (do (pg-log "window+renderer up (borderless 1280x720)")
                         (start-text-input)
+                        (slot-set 17 sclk)
+                        (clear-click)
                         (if (= isurl 1) (start-nav url &mut a) 0)
-                        (frame-loop ren page n 1280 720 (if (or smoke (= surl 1) (= snav 1)) 120 0) &mut a)
+                        (frame-loop ren page n 1280 720 (if (or smoke (= surl 1) (= snav 1) (= sclk 1)) 120 0) &mut a)
                         (sdl2-raw-destroy-renderer ren)
                         (sdl2-raw-destroy-window win)
                         (pg-log "clean exit")
