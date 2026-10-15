@@ -20,6 +20,8 @@
 #  17. css / markdown                 <style> rules are collected, F12/X and F11/P toggle css and markdown
 #  18. images                         <img src=x.png> is fetched, decoded and stored once the page stream closed;
 #                                      a missing file and a non-PNG fail honestly (placeholder, no crash)
+#  19. forms, entities, keys         <form> GET and POST (urlencoded body reaches the server), &amp;/&quot;/curly
+#                                      quotes, PageUp/PageDown/Home/End, Shift+J/K/L/I window move
 #  14. bundle beside the exe           (Windows/Wine only: PELLEGRINO_WINE + PELLEGRINO_EXE_DIR) cacert.pem next
 #                                      to the exe is found even when its directory is not ANSI-representable
 set -euo pipefail
@@ -207,6 +209,27 @@ open("www/pics.html", "w").write('<p>a<img src="red.png" alt="red"> b<img src="/
 PY
 run "--smoke-url=http://127.0.0.1:$PORT/pics.html"
 for n in "img: loaded http://127.0.0.1:$PORT/red.png 20" "img: failed http://127.0.0.1:$PORT/gone.png" "img: failed http://127.0.0.1:$PORT/fake.jpg" "clean exit"; do need "$n"; done
+
+echo "== 19. forms: a synthetic click focuses the field, text is typed, Enter submits (GET and POST)"
+printf '<form action="/index.html" method="get"><input name="q" value="pre"><input type="hidden" name="h" value="a b&amp;c"><input type="checkbox" name="c" checked><input type="submit" name="go" value="Go"></form>\n' > www/form_get.html
+printf '<form action="/submit" method="post"><input name="p" value="x"><input type="hidden" name="h" value="a b"><input type="submit" name="go" value="Go"></form>\n' > www/form_post.html
+run "--smoke-form=http://127.0.0.1:$PORT/form_get.html"
+for n in "smoke-form: typing" "navigate http://127.0.0.1:$PORT/index.html?q=prehello+world+%26+co&h=a+b%26c&c=on" "clean exit"; do need "$n"; done
+rm -f www/post.log
+run "--smoke-form=http://127.0.0.1:$PORT/form_post.html"
+need "form: POST http://127.0.0.1:$PORT/submit"
+grep -q '^/submit p=xhello+world+%26+co&h=a+b$' www/post.log || { echo "FAIL: POST body wrong"; cat www/post.log; exit 1; }
+echo "== 19b. entities and curly quotes decode; scroll keys; window move"
+python3 - > www/long.html <<'PY'
+print("<p>Tom &amp; Jerry &lt;3 &#65;&#x42; \u201cq\u201d \u2014 done</p>")
+for i in range(150):
+    print("<p>row %d</p>" % i)
+PY
+run "--smoke-keys=http://127.0.0.1:$PORT/long.html"
+for n in "smoke-keys: scroll=0" "clean exit"; do need "$n"; done
+grep -q 'smoke-keys: scroll=[1-9]' pellegrino.log || { echo "FAIL: PageDown did not scroll"; cat pellegrino.log; exit 1; }
+run "--smoke-move=http://127.0.0.1:$PORT/index.html"
+[ "$(grep -c '^window: move' pellegrino.log)" -eq 2 ] || { echo "FAIL: window did not move"; cat pellegrino.log; exit 1; }
 
 if [ -n "${PELLEGRINO_WINE:-}" ] && [ -d "${PELLEGRINO_EXE_DIR:-/nonexistent}" ]; then
   echo "== 14. cacert.pem beside the exe, directory name not representable in the ANSI code page"

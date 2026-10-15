@@ -26,6 +26,7 @@ def main():
     port, root = int(args[0]), args[1]
     cert, key = (os.path.abspath(args[2]), os.path.abspath(args[3])) if len(args) >= 4 else (None, None)
     os.chdir(root)
+    root_abs = os.getcwd()
 
     class H(http.server.SimpleHTTPRequestHandler):
         protocol_version = "HTTP/1.0"
@@ -56,6 +57,19 @@ def main():
                 self.end_headers()
                 return
             return super().do_GET()
+
+        def do_POST(self):
+            # form submission: record "<path> <body>" next to the pages and answer with a page that shows it
+            n = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(n)
+            with open(os.path.join(root_abs, "post.log"), "ab") as f:
+                f.write(self.path.encode() + b" " + body + b"\n")
+            out = b"<html><body><p>posted</p></body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
 
         def log_message(self, *a):
             pass

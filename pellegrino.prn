@@ -1123,8 +1123,13 @@
           c (slot-set 32 (tget 6))]
       (if (= ua 9) (bullet) 0))))
 
-(defn note-page-bg [] : I32
-  (if (>= (tget 2) 0) (slot-set 297 (tget 2)) 0))
+;; canvas colour: <html>'s background when it has one, else <body>'s (CSS "background propagation")
+(defn note-page-bg [(is-html : I32)] : I32
+  (cond
+    ((< (tget 2) 0) 0)
+    ((= is-html 1) (do (slot-set 297 (tget 2)) (slot-set 1086 1) 0))
+    ((= (slot-get 1086) 1) 0)
+    (true (slot-set 297 (tget 2)))))
 
 ;; <p>/<li> opened while one is the current element closes it first
 (defn implied-close [(ua : I32) (h : I32)] : I32
@@ -1160,7 +1165,7 @@
             cs (if (= (slot-get 24) 1) (author-style page ns ne te h) 0)
             fe (if (= blk 1) (flex-enter) 0)
             gm (finish-geom blk)
-            pb (if (= ua 18) (note-page-bg) 0)
+            pb (if (= ua 18) (note-page-bg (word-eq page ns ne "html")) 0)
             hd (note-hide)
             op (if (= blk 1) (open-rows ua) 0)]
         0))))
@@ -1276,6 +1281,319 @@
         (let [a (img-label st)]
           (img-alt page ne te))))))
 
+;; ---- forms (v1.6): <form>, <input> text/password/hidden/checkbox/radio/submit/button, <button> ----
+;; Slots: 1088 focused entry (-1 none), 1089 entry count, 1091 current <form> tag index (-1), 1092/1093/1094
+;; <button> start px/row/entry (-1 none), 1095 POST body pending in the line buffer, 1096 pending submit
+;; trigger entry (-1), 1097 window handle, 1098 total rows of the last pass.
+;; Entry k at 1100+14k (k < 24): +0 tag index, +1 value length (-1 = not initialised yet), +2 checked,
+;; +3 owning form tag index, +4 kind (1 text, 2 password, 3 hidden, 4 checkbox, 5 radio, 6 button),
+;; +5 name hash, +6..+13 value bytes (4 per slot, 32 max).
+(defn fm-base [(k : I32)] : I32
+  (+ 1100 (* k 14)))
+
+(defn fm-get [(k : I32) (f : I32)] : I32
+  (slot-get (+ (fm-base k) f)))
+
+(defn fm-set [(k : I32) (f : I32) (v : I32)] : I32
+  (slot-set (+ (fm-base k) f) v))
+
+(defn fm-pow [(j : I32)] : I32
+  (cond
+    ((= j 0) 1)
+    ((= j 1) 256)
+    ((= j 2) 65536)
+    (true 16777216)))
+
+(defn fm-ch [(k : I32) (i : I32)] : I32
+  (mod (/ (fm-get k (+ 6 (/ i 4))) (fm-pow (mod i 4))) 256))
+
+(defn fm-put [(k : I32) (i : I32) (c : I32)] : I32
+  (let [f (+ 6 (/ i 4))
+        p (fm-pow (mod i 4))
+        v (fm-get k f)
+        old (mod (/ v p) 256)]
+    (fm-set k f (+ (- v (* old p)) (* c p)))))
+
+(defn fm-find [(pos : I32)] : I32
+  (loop [k 0]
+    (if (>= k (slot-get 1089))
+      -1
+      (if (= (fm-get k 0) pos) k (recur (+ k 1))))))
+
+(defn fm-add [(pos : I32)] : I32
+  (let [k (slot-get 1089)]
+    (if (>= k 24)
+      -1
+      (do (fm-set k 0 pos) (fm-set k 1 -1) (fm-set k 2 0) (fm-set k 3 (slot-get 1091))
+          (fm-set k 4 1) (fm-set k 5 0)
+          (slot-set 1089 (+ k 1))
+          k))))
+
+(defn fm-entry [(pos : I32)] : I32
+  (let [k (fm-find pos)]
+    (if (>= k 0) k (fm-add pos))))
+
+(defn fm-kind [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (if (= (word-eq page ns ne "button") 1)
+    6
+    (let [s (attr-start page ne te "type=")
+          e (if (< s 0) -1 (href-end page s te))]
+      (cond
+        ((< e 0) 1)
+        ((= (word-eq page s e "password") 1) 2)
+        ((= (word-eq page s e "hidden") 1) 3)
+        ((= (word-eq page s e "checkbox") 1) 4)
+        ((= (word-eq page s e "radio") 1) 5)
+        ((= (word-eq page s e "submit") 1) 6)
+        ((= (word-eq page s e "button") 1) 6)
+        ((= (word-eq page s e "reset") 1) 6)
+        ((= (word-eq page s e "image") 1) 6)
+        (true 1)))))
+
+(defn fm-name-hash [(page : String @ Region) (ne : I32) (te : I32)] : I32
+  (let [s (attr-start page ne te "name=")
+        e (if (< s 0) -1 (href-end page s te))]
+    (if (< e 0) 0 (hash-range page s e))))
+
+(defn fm-copy [(k : I32) (page : String @ Region) (s : I32) (e : I32)] : I32
+  (loop [i s n 0]
+    (if (or (>= i e) (>= n 32))
+      (fm-set k 1 n)
+      (let [pk (fm-ent-code page i e)
+            c (if (> pk 0) (mod pk 4096) (string/char-at page i))
+            st (if (> pk 0) (/ pk 4096) 1)]
+        (if (and (>= c 32) (< c 127))
+          (let [p (fm-put k n c)] (recur (+ i st) (+ n 1)))
+          (recur (+ i st) n))))))
+
+(defn fm-checked? [(page : String @ Region) (ne : I32) (te : I32)] : I32
+  (loop [i ne]
+    (if (> (+ i 7) te)
+      0
+      (if (and (ws? (string/char-at page (- i 1))) (= (match-at page i "checked") 1))
+        1
+        (recur (+ i 1))))))
+
+(defn fm-init-check [(k : I32) (page : String @ Region) (ne : I32) (te : I32)] : I32
+  (do (fm-set k 2 (fm-checked? page ne te)) (fm-set k 1 0)))
+
+(defn fm-load [(k : I32) (kind : I32) (page : String @ Region) (ne : I32) (te : I32)] : I32
+  (let [s (attr-start page ne te "value=")
+        e (if (< s 0) -1 (href-end page s te))]
+    (cond
+      ((or (= kind 4) (= kind 5)) (fm-init-check k page ne te))
+      ((or (= kind 1) (= kind 2)) (if (< e 0) (fm-set k 1 0) (fm-copy k page s e)))
+      (true (fm-set k 1 0)))))
+
+(defn fm-sync [(k : I32) (kind : I32) (nh : I32) (page : String @ Region) (ne : I32) (te : I32)] : I32
+  (do (fm-set k 4 kind)
+      (fm-set k 5 nh)
+      (if (< (fm-get k 1) 0) (fm-load k kind page ne te) 0)))
+
+(defn fm-eat [] : I32
+  (do (slot-set 13 -1) (slot-set 14 -1) 0))
+
+(defn fm-hit? [(col : I32) (w : I32)] : Bool
+  (let [px (+ (slot-get 36) col)
+        py (row-y (slot-get 33))
+        ch (* 18 (lh (tget 3)))]
+    (and (>= (slot-get 13) px) (< (slot-get 13) (+ px w))
+         (and (>= (slot-get 14) py) (< (slot-get 14) (+ py ch))))))
+
+(defn fm-rect [(col : I32) (w : I32) (bord : I32) (bg : I32)] : I32
+  (let [r (slot-get 33)
+        ren (slot-get 38)
+        px (+ (slot-get 36) col)
+        py (row-y r)
+        ch (- (* 18 (lh (tget 3))) 2)
+        ef (ensure-fill r)
+        b1 (fill-rect-col ren bord px (+ py 1) w ch)
+        b2 (fill-rect-col ren bg (+ px 1) (+ py 2) (- w 2) (- ch 2))]
+    0))
+
+(defn fm-ink [(foc : I32)] : I32
+  (if (= foc 1)
+    (sdl2-raw-set-draw-color (slot-get 38) 255 176 64 255)
+    (sdl2-raw-set-draw-color (slot-get 38) 216 216 216 255)))
+
+(defn fm-glyphs [(k : I32) (px : I32) (py : I32) (s : I32) (size : I32) (pw : I32) (foc : I32)] : I32
+  (let [ren (slot-get 38)
+        cw (* 6 s)
+        n (fm-get k 1)
+        st (if (> n (- size 1)) (- n (- size 1)) 0)
+        c0 (sdl2-raw-set-draw-color ren 216 216 216 255)
+        lp (loop [i st]
+             (if (>= i n)
+               0
+               (let [g (draw-glyph ren (if (= pw 1) 42 (fm-ch k i)) (+ px (+ 2 (* (- i st) cw))) py s)]
+                 (recur (+ i 1)))))
+        c1 (fm-ink foc)
+        cr (if (= foc 1) (draw-glyph ren 95 (+ px (+ 2 (* (- n st) cw))) py s) 0)]
+    0))
+
+(defn fm-focus [(k : I32)] : I32
+  (do (slot-set 1088 k) (fm-eat) (slot-set 2 1) 0))
+
+(defn fm-field [(k : I32) (size : I32) (pw : I32)] : I32
+  (let [s (tget 3)
+        cw (* 6 s)
+        w (+ (* size cw) 4)
+        wr (wrap-if w)
+        r (slot-get 33)
+        col (slot-get 32)
+        foc (if (= (slot-get 1088) k) 1 0)
+        vis (row-vis? r)
+        a (if vis (fm-rect col w (if (= foc 1) 16757824 6710886) 1316892) 0)
+        b (if vis (fm-glyphs k (+ (slot-get 36) col) (row-y r) s size pw foc) 0)
+        h (if (and vis (fm-hit? col w)) (fm-focus k) 0)]
+    (slot-set 32 (+ col (+ w cw)))))
+
+(defn fm-radio-off [(k : I32)] : I32
+  (loop [j 0]
+    (if (>= j (slot-get 1089))
+      0
+      (let [x (if (and (not (= j k))
+                       (and (= (fm-get j 3) (fm-get k 3))
+                            (and (= (fm-get j 5) (fm-get k 5)) (= (fm-get j 4) 5))))
+                (fm-set j 2 0)
+                0)]
+        (recur (+ j 1))))))
+
+(defn fm-radio-on [(k : I32)] : I32
+  (do (fm-radio-off k) (fm-set k 2 1)))
+
+(defn fm-toggle [(k : I32) (kind : I32)] : I32
+  (if (= kind 5)
+    (fm-radio-on k)
+    (fm-set k 2 (- 1 (fm-get k 2)))))
+
+(defn fm-flip [(k : I32) (kind : I32)] : I32
+  (do (fm-toggle k kind)
+      (fm-eat)
+      (slot-set 2 1)
+      0))
+
+(defn fm-mark [(kind : I32) (px : I32) (py : I32) (s : I32)] : I32
+  (let [c0 (fm-ink 1)]
+    (draw-glyph (slot-get 38) (if (= kind 5) 111 120) px py s)))
+
+(defn fm-check [(k : I32) (kind : I32)] : I32
+  (let [s (tget 3)
+        cw (* 6 s)
+        w (* 2 cw)
+        wr (wrap-if w)
+        r (slot-get 33)
+        col (slot-get 32)
+        vis (row-vis? r)
+        a (if vis (fm-rect col w 6710886 1316892) 0)
+        on (fm-get k 2)
+        b (if (and vis (= on 1)) (fm-mark kind (+ (slot-get 36) (+ col (/ cw 2))) (row-y r) s) 0)
+        h (if (and vis (fm-hit? col w)) (fm-flip k kind) 0)]
+    (slot-set 32 (+ col (+ w cw)))))
+
+;; label glyphs of src[s,e) inside a button box starting at px
+(defn fm-label [(src : String @ Region) (s : I32) (e : I32) (px : I32) (py : I32) (sc : I32)] : I32
+  (let [ren (slot-get 38)
+        cw (* 6 sc)
+        c0 (sdl2-raw-set-draw-color ren 216 216 216 255)]
+    (loop [i s]
+      (if (or (>= i e) (>= (- i s) 24))
+        0
+        (let [g (draw-glyph ren (string/char-at src i) (+ px (* (+ (- i s) 1) cw)) py sc)]
+          (recur (+ i 1)))))))
+
+(defn fm-trigger [(k : I32)] : I32
+  (do (slot-set 1096 k) (fm-eat) (slot-set 2 1) 0))
+
+(defn fm-btn-box [(k : I32) (src : String @ Region) (s : I32) (e : I32)] : I32
+  (let [sc (tget 3)
+        cw (* 6 sc)
+        n0 (- e s)
+        n (if (> n0 24) 24 n0)
+        w (* (+ n 2) cw)
+        wr (wrap-if w)
+        r (slot-get 33)
+        col (slot-get 32)
+        vis (row-vis? r)
+        a (if vis (fm-rect col w 6710886 3029574) 0)
+        b (if vis (fm-label src s e (+ (slot-get 36) col) (row-y r) sc) 0)
+        h (if (and vis (fm-hit? col w)) (fm-trigger k) 0)]
+    (slot-set 32 (+ col (+ w cw)))))
+
+(defn fm-btn [(k : I32) (page : String @ Region) (ne : I32) (te : I32)] : I32
+  (let [s (attr-start page ne te "value=")
+        e (if (< s 0) -1 (href-end page s te))]
+    (if (< e 0)
+      (fm-btn-box k "Submit" 0 6)
+      (fm-btn-box k page s e))))
+
+(defn fm-size [(page : String @ Region) (ne : I32) (te : I32)] : I32
+  (let [v (attr-int page ne te "size=")]
+    (cond
+      ((< v 0) 20)
+      ((< v 4) 4)
+      ((> v 40) 40)
+      (true v))))
+
+(defn fm-draw [(k : I32) (kind : I32) (page : String @ Region) (ne : I32) (te : I32)] : I32
+  (cond
+    ((= kind 3) 0)
+    ((or (= kind 1) (= kind 2)) (fm-field k (fm-size page ne te) (if (= kind 2) 1 0)))
+    ((or (= kind 4) (= kind 5)) (fm-check k kind))
+    (true (fm-btn k page ne te))))
+
+(defn fm-input [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [kind (fm-kind page ns ne te)
+        nh (fm-name-hash page ne te)
+        k (fm-entry (slot-get 621))]
+    (if (< k 0)
+      0
+      (let [y (fm-sync k kind nh page ne te)]
+        (if (hidden?) 0 (fm-draw k kind page ne te))))))
+
+;; <button>: "[ label ]" through the normal text path; the click box is recorded here and tested at </button>
+(defn fm-button-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [nh (fm-name-hash page ne te)
+        k (fm-entry (slot-get 621))
+        y (if (>= k 0) (fm-sync k 6 nh page ne te) 0)]
+    (if (or (< k 0) (hidden?))
+      0
+      (let [a (put-char 91 0 1000 -1 -1 -1)
+            b (slot-set 1094 k)
+            c (slot-set 1092 (- (slot-get 32) (* 6 (tget 3))))
+            d (slot-set 1093 (slot-get 33))]
+        (put-char 32 0 1000 -1 -1 -1)))))
+
+(defn fm-button-hit [(k : I32)] : I32
+  (let [r (slot-get 1093)
+        px (+ (slot-get 36) (slot-get 1092))
+        x1 (+ (slot-get 36) (slot-get 32))
+        py (row-y r)
+        ch (* 18 (lh (tget 3)))]
+    (if (and (= r (slot-get 33)) (row-vis? r)
+             (and (>= (slot-get 13) px) (< (slot-get 13) x1)
+                  (and (>= (slot-get 14) py) (< (slot-get 14) (+ py ch)))))
+      (fm-trigger k)
+      0)))
+
+(defn fm-button-close [] : I32
+  (let [k (slot-get 1094)]
+    (if (< k 0)
+      0
+      (let [a (put-char 32 0 1000 -1 -1 -1)
+            b (put-char 93 0 1000 -1 -1 -1)
+            h (fm-button-hit k)]
+        (slot-set 1094 -1)))))
+
+(defn fm-form-open [] : I32
+  (slot-set 1091 (slot-get 621)))
+
+(defn fm-form-close [] : I32
+  (slot-set 1091 -1))
+
+(defn form-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (do (fm-form-open) (push-styled page ns ne te)))
+
 (defn open-named [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
   (cond
     ((= (word-eq page ns ne "br") 1) (do-br))
@@ -1283,7 +1601,9 @@
     ((= (word-eq page ns ne "img") 1) (img-open page ne te))
     ((= (word-eq page ns ne "meta") 1) 0)
     ((= (word-eq page ns ne "link") 1) 0)
-    ((= (word-eq page ns ne "input") 1) 0)
+    ((= (word-eq page ns ne "input") 1) (fm-input page ns ne te))
+    ((= (word-eq page ns ne "button") 1) (fm-button-open page ns ne te))
+    ((= (word-eq page ns ne "form") 1) (form-open page ns ne te))
     ((= (word-eq page ns ne "base") 1) 0)
     ((= (word-eq page ns ne "wbr") 1) 0)
     (true (push-styled page ns ne te))))
@@ -1330,13 +1650,22 @@
       0
       (let [t (close-top)] (recur (+ k 1))))))
 
+(defn close-generic [(page : String @ Region) (ns : I32) (ne : I32)] : I32
+  (let [d (find-open (hash-range page ns ne))]
+    (if (> d 0) (close-to d) 0)))
+
+(defn form-close [(page : String @ Region) (ns : I32) (ne : I32)] : I32
+  (do (fm-form-close) (close-generic page ns ne)))
+
 (defn close-tag [(page : String @ Region) (i : I32) (revealed : I32)] : I32
   (let [ns (+ i 2)
         ne (name-end page ns revealed)]
-    (if (= ne ns)
-      0
-      (let [d (find-open (hash-range page ns ne))]
-        (if (> d 0) (close-to d) 0)))))
+    (cond
+      ((= ne ns) 0)
+      ((= (word-eq page ns ne "button") 1) (fm-button-close))
+      ((= (word-eq page ns ne "form") 1)
+       (form-close page ns ne))
+      (true (close-generic page ns ne)))))
 
 ;; ---- markdown (rendered through the same style stack as HTML) ----
 (defn md-on? [] : Bool
@@ -1427,9 +1756,9 @@
                  (rows : I32) (x0 : I32) (y0 : I32) (width : I32)] : I32
   (do (slot-set 38 ren) (slot-set 34 scroll) (slot-set 35 rows) (slot-set 36 x0) (slot-set 37 y0)
       (slot-set 39 width) (slot-set 31 0) (slot-set 32 0) (slot-set 33 0) (slot-set 27 -1)
-      (slot-set 28 0) (slot-set 29 0) (slot-set 30 0) (slot-set 297 -1)
+      (slot-set 28 0) (slot-set 29 0) (slot-set 30 0) (slot-set 297 -1) (slot-set 1086 0)
       (slot-set 610 0) (slot-set 611 0) (slot-set 613 0) (slot-set 614 0) (slot-set 616 0) (slot-set 617 revealed)
-      (slot-set 619 0) (slot-set 620 0)
+      (slot-set 619 0) (slot-set 620 0) (slot-set 1091 -1) (slot-set 1094 -1)
       (init-root width)
       (if (= (slot-get 24) 1) (scan-styles page start revealed) 0)
       0))
@@ -1450,6 +1779,7 @@
 
 (defn finish-draw [(ln : I32)] : I32
   (let [a (slot-set 22 ln)
+        t (slot-set 1098 (slot-get 33))
         b (if (= (slot-get 297) (slot-get 296)) 0 (page-bg-changed))
         c (log-rules)]
     (slot-get 33)))
@@ -1466,6 +1796,151 @@
       ((and (= c1 47) (or (= c2 97) (= c2 65)) (or (ws? c3) (= c3 62))) 4)
       ((= c1 47) 5)
       (true 0))))
+
+;; ---- HTML entities + the UTF-8 punctuation people actually write (v1.6) ----
+;; ent-pack returns len*4096 + code (0 = not an entity / not decodable yet). Codes < 1000 are one ASCII
+;; glyph; 1001 "...", 1002 "(c)", 1003 "(tm)", 1004 "(r)", 1005 "<<", 1006 ">>", 1007 "--", 1010 nothing.
+;; The font is ASCII only, so typographic quotes/dashes fold to their ASCII look-alikes.
+(defn cp-map [(cp : I32)] : I32
+  (cond
+    ((and (>= cp 32) (< cp 127)) cp)
+    ((= cp 160) 32)
+    ((or (= cp 8216) (or (= cp 8217) (= cp 8218))) 39)
+    ((or (= cp 8220) (or (= cp 8221) (= cp 8222))) 34)
+    ((= cp 8211) 45)
+    ((= cp 8212) 1007)
+    ((= cp 8230) 1001)
+    ((= cp 169) 1002)
+    ((= cp 8482) 1003)
+    ((= cp 174) 1004)
+    ((= cp 8226) 42)
+    ((= cp 183) 46)
+    ((= cp 171) 1005)
+    ((= cp 187) 1006)
+    ((= cp 215) 120)
+    ((or (= cp 8203) (= cp 65279)) 1010)
+    ((= cp 8594) 1011)
+    ((= cp 8592) 1012)
+    (true 63)))
+
+(defn ent-named [(page : String @ Region) (a : I32) (b : I32)] : I32
+  (cond
+    ((= (word-eq page a b "amp") 1) 38)
+    ((= (word-eq page a b "lt") 1) 60)
+    ((= (word-eq page a b "gt") 1) 62)
+    ((= (word-eq page a b "quot") 1) 34)
+    ((= (word-eq page a b "apos") 1) 39)
+    ((= (word-eq page a b "nbsp") 1) 32)
+    ((= (word-eq page a b "lsquo") 1) 39)
+    ((= (word-eq page a b "rsquo") 1) 39)
+    ((= (word-eq page a b "sbquo") 1) 39)
+    ((= (word-eq page a b "ldquo") 1) 34)
+    ((= (word-eq page a b "rdquo") 1) 34)
+    ((= (word-eq page a b "bdquo") 1) 34)
+    ((= (word-eq page a b "ndash") 1) 45)
+    ((= (word-eq page a b "mdash") 1) 1007)
+    ((= (word-eq page a b "hellip") 1) 1001)
+    ((= (word-eq page a b "copy") 1) 1002)
+    ((= (word-eq page a b "trade") 1) 1003)
+    ((= (word-eq page a b "reg") 1) 1004)
+    ((= (word-eq page a b "bull") 1) 42)
+    ((= (word-eq page a b "middot") 1) 46)
+    ((= (word-eq page a b "laquo") 1) 1005)
+    ((= (word-eq page a b "raquo") 1) 1006)
+    ((= (word-eq page a b "times") 1) 120)
+    ((= (word-eq page a b "shy") 1) 1010)
+    ((= (word-eq page a b "rarr") 1) 1011)
+    ((= (word-eq page a b "larr") 1) 1012)
+    (true 0)))
+
+(defn ent-hex [(page : String @ Region) (a : I32) (b : I32)] : I32
+  (loop [k a v 0]
+    (if (>= k b)
+      v
+      (let [h (hexd (string/char-at page k))]
+        (if (or (< h 0) (> v 100000)) -1 (recur (+ k 1) (+ (* v 16) h)))))))
+
+(defn ent-num [(page : String @ Region) (a : I32) (b : I32)] : I32
+  (let [c (string/char-at page a)]
+    (cond
+      ((>= a b) 0)
+      ((or (= c 120) (= c 88)) (ent-cp (ent-hex page (+ a 1) b)))
+      ((digit? c) (if (= (skip-digits page a b) b) (cp-map (scan-int page a b)) 0))
+      (true 0))))
+
+(defn ent-cp [(v : I32)] : I32
+  (if (< v 0) 0 (cp-map v)))
+
+(defn ent-semi [(page : String @ Region) (i : I32) (rev : I32)] : I32
+  (let [lim (if (< rev (+ i 12)) rev (+ i 12))]
+    (loop [k (+ i 1)]
+      (if (>= k lim)
+        -1
+        (let [c (string/char-at page k)]
+          (cond
+            ((= c 59) k)
+            ((or (letter? c) (or (digit? c) (= c 35))) (recur (+ k 1)))
+            (true -1)))))))
+
+(defn amp-ent [(page : String @ Region) (i : I32) (rev : I32)] : I32
+  (let [semi (ent-semi page i rev)]
+    (if (< semi 0)
+      0
+      (let [code (if (= (string/char-at page (+ i 1)) 35)
+                   (ent-num page (+ i 2) semi)
+                   (ent-named page (+ i 1) semi))]
+        (if (= code 0) 0 (+ (* (+ (- semi i) 1) 4096) code))))))
+
+(defn byte-at [(page : String @ Region) (i : I32)] : I32
+  (let [c (string/char-at page i)]
+    (if (< c 0) (+ c 256) c)))
+
+(defn utf-len [(c : I32)] : I32
+  (cond
+    ((>= c 240) 4)
+    ((>= c 224) 3)
+    ((>= c 192) 2)
+    (true 1)))
+
+(defn utf-cp [(page : String @ Region) (i : I32) (c : I32) (n : I32)] : I32
+  (cond
+    ((= n 2) (+ (* (- c 192) 64) (- (byte-at page (+ i 1)) 128)))
+    ((= n 3) (+ (* (- c 224) 4096)
+                (+ (* (- (byte-at page (+ i 1)) 128) 64) (- (byte-at page (+ i 2)) 128))))
+    (true 63)))
+
+(defn utf-ent [(page : String @ Region) (i : I32) (rev : I32)] : I32
+  (let [c (byte-at page i)
+        n (utf-len c)]
+    (if (> (+ i n) rev)
+      (+ (* (- rev i) 4096) 63)
+      (+ (* n 4096) (cp-map (utf-cp page i c n))))))
+
+(defn ent-pack [(page : String @ Region) (i : I32) (rev : I32)] : I32
+  (let [c (byte-at page i)]
+    (cond
+      ((= c 38) (amp-ent page i rev))
+      ((>= c 128) (utf-ent page i rev))
+      (true 0))))
+
+(defn put-lit [(a : I32) (b : I32) (c : I32)] : I32
+  (let [x (put-char a 0 1000 -1 -1 -1)
+        y (if (> b 0) (put-char b 0 1000 -1 -1 -1) 0)]
+    (if (> c 0) (put-char c 0 1000 -1 -1 -1) 0)))
+
+(defn put-ent [(code : I32) (i : I32) (rev : I32) (hs : I32) (he : I32) (ord : I32)] : I32
+  (cond
+    ((< code 1000) (put-char code i rev hs he ord))
+    ((= code 1001) (put-lit 46 46 46))
+    ((= code 1002) (put-lit 40 99 41))
+    ((= code 1003) (put-lit 84 77 0))
+    ((= code 1004) (put-lit 40 114 41))
+    ((= code 1005) (put-lit 60 60 0))
+    ((= code 1006) (put-lit 62 62 0))
+    ((= code 1007) (put-lit 45 45 0))
+    ((= code 1011) (put-lit 45 62 0))
+    ((= code 1012) (put-lit 60 45 0))
+    (true 0)))
 
 (defn draw-page [(ren : I32) (page : String @ Region) (start : I32) (revealed : I32) (scroll : I32)
                  (cols : I32) (rows : I32) (x0 : I32) (y0 : I32)] : I32
@@ -1500,6 +1975,10 @@
                  (true (let [t (open-tag page i revealed)] (recur (+ i 1) 1 hs he ln))))))
             ((= c 10) (let [t (do-newline)] (recur (+ i 1) 0 hs he ln)))
             ((= c 13) (recur (+ i 1) 0 hs he ln))
+            ((> (ent-pack page i revealed) 0)
+             (let [pk (ent-pack page i revealed)
+                   p (put-ent (mod pk 4096) i revealed hs he (- ln 1))]
+               (recur (+ i (/ pk 4096)) 0 hs he ln)))
             (true
              (let [k (md-kind page i start revealed hs)]
                (cond
@@ -1638,11 +2117,23 @@
       (pg-log msg)
       0))
 
-(defn send-request [(fd : I32) (host : String @ Region) (path : String @ Region) (dest : Arena @ Region)] : I32
-  (let [r1 (string/concat "GET " path dest)
+(defn post-head [(host : String @ Region) (path : String @ Region) (dest : Arena @ Region)] : String
+  (let [body (linebuf-get)
+        r1 (string/concat "POST " path dest)
         r2 (string/concat r1 " HTTP/1.0\r\nHost: " dest)
         r3 (string/concat r2 host dest)
-        req (string/concat r3 "\r\nUser-Agent: PELLEGRINO/v1\r\nAccept: text/html,text/plain,*/*\r\nConnection: close\r\n\r\n" dest)]
+        r4 (string/concat r3 "\r\nUser-Agent: PELLEGRINO/v1\r\nAccept: text/html,text/plain,*/*\r\nConnection: close\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: " dest)
+        r5 (string/concat r4 (string/i32-to-string (string/length body) dest) dest)]
+    (string/concat r5 (string/concat "\r\n\r\n" body dest) dest)))
+
+(defn get-head [(host : String @ Region) (path : String @ Region) (dest : Arena @ Region)] : String
+  (let [r1 (string/concat "GET " path dest)
+        r2 (string/concat r1 " HTTP/1.0\r\nHost: " dest)
+        r3 (string/concat r2 host dest)]
+    (string/concat r3 "\r\nUser-Agent: PELLEGRINO/v1\r\nAccept: text/html,text/plain,*/*\r\nConnection: close\r\n\r\n" dest)))
+
+(defn send-request [(fd : I32) (host : String @ Region) (path : String @ Region) (dest : Arena @ Region)] : I32
+  (let [req (if (= (slot-get 1095) 1) (post-head host path dest) (get-head host path dest))]
     (do (slot-set 6 1)
         (slot-set 4 fd)
         (pg-log-n "connected; fd=" fd dest)
@@ -1740,8 +2231,15 @@
     (slot-set 26 (url-md? url))
     (slot-set 18 -1)
     (slot-set 10 (+ (slot-get 10) 1))
+    (slot-set 1088 -1)
+    (slot-set 1089 0)
+    (slot-set 1096 -1)
     (pg-log (string/concat "navigate " url dest))
-    (nav-dispatch url dest)))
+    (nav-then url (nav-dispatch url dest))))
+
+;; the POST flag lives for one request: redirects (and any failure) go back to GET
+(defn nav-then [(url : String @ Region) (r : I32)] : I32
+  (do (slot-set 1095 0) r))
 
 ;; index just past the first CRLFCRLF in buf[0..len), or -1
 (defn find-hdr-end [(buf : String @ Region) (len : I32)] : I32
@@ -1998,8 +2496,14 @@
         (start-nav target dest))
     0))
 
+(defn amp-fix [(s : String @ Region) (dest : Arena @ Region)] : String @ Region
+  (let [out (alloc dest String (+ (string/length s) 1))]
+    #target
+    {:c (inline-c "{ size_t j = 0; for (size_t i = 0; s[i]; ) { if (strncmp(s + i, \"&amp;\", 5) == 0) { out[j++] = '&'; i += 5; } else { out[j++] = s[i++]; } } out[j] = 0; }")}
+    out))
+
 (defn follow-link [(page : String @ Region) (dest : Arena @ Region)] : I32
-  (let [h (string/substring (cur-page page) (slot-get 15) (slot-get 16) dest)]
+  (let [h (amp-fix (string/substring (cur-page page) (slot-get 15) (slot-get 16) dest) dest)]
     (go-link (resolve-href h dest) dest)))
 
 (defn clear-click [] : I32
@@ -2026,7 +2530,7 @@
 (defn on-click [(x : I32) (y : I32)] : I32
   (if (= (slot-get 3) 1)
     0
-    (do (slot-set 13 x) (slot-set 14 y) (slot-set 15 -1) (slot-set 2 1) 0)))
+    (do (slot-set 1088 -1) (slot-set 13 x) (slot-set 14 y) (slot-set 15 -1) (slot-set 2 1) 0)))
 
 ;; ---- input ----
 (defn go-url [(dest : Arena @ Region)] : I32
@@ -2041,8 +2545,23 @@
 (defn leave-typing [] : I32
   (do (slot-set 3 0) (slot-set 2 1) 0))
 
+(defn clamp-scroll [(v : I32)] : I32
+  (let [mx (if (> (slot-get 1098) 1) (- (slot-get 1098) 1) 0)]
+    (cond
+      ((< v 0) 0)
+      ((> v mx) mx)
+      (true v))))
+
 (defn scroll-to [(v : I32)] : I32
-  (do (slot-set 1 (if (> v 0) v 0)) (slot-set 2 1) 0))
+  (do (slot-set 1 (clamp-scroll v)) (slot-set 2 1) 0))
+
+;; last full screen of the page
+(defn scroll-end [] : I32
+  (scroll-to (- (slot-get 1098) (slot-get 35))))
+
+(defn page-rows [] : I32
+  (let [r (- (slot-get 35) 1)]
+    (if (< r 1) 1 r)))
 
 (defn on-key-typing [(k : I32) (dest : Arena @ Region)] : I32
   (cond
@@ -2082,6 +2601,10 @@
 
 (defn on-key-view [(k : I32)] : I32
   (cond
+    ((and (shift-held?) (= k 106)) (move-win -48 0))
+    ((and (shift-held?) (= k 108)) (move-win 48 0))
+    ((and (shift-held?) (= k 105)) (move-win 0 -48))
+    ((and (shift-held?) (= k 107)) (move-win 0 48))
     ((or (= k 1073741893) (= k 120)) (toggle-css))
     ((or (= k 1073741892) (= k 112)) (toggle-md))
     ((= k 9) (select-link (if (shift-held?) -1 1)))
@@ -2089,14 +2612,17 @@
     ((or (= k 27) (= k 113)) 1)
     ((= k (key-up)) (scroll-to (- (slot-get 1) 1)))
     ((= k (key-down)) (scroll-to (+ (slot-get 1) 1)))
-    ((= k (key-home)) (scroll-to 0))
-    ((= k (key-end)) (scroll-to (+ (slot-get 1) 20)))
+    ((or (= k (key-home)) (= k 1073741898)) (scroll-to 0))
+    ((or (= k (key-end)) (= k 1073741901)) (scroll-end))
+    ((= k 1073741899) (scroll-to (- (slot-get 1) (page-rows))))
+    ((= k 1073741902) (scroll-to (+ (slot-get 1) (page-rows))))
     (true 0)))
 
 (defn on-key [(k : I32) (dest : Arena @ Region)] : I32
-  (if (= (slot-get 3) 1)
-    (on-key-typing k dest)
-    (on-key-view k)))
+  (cond
+    ((= (slot-get 3) 1) (on-key-typing k dest))
+    ((>= (slot-get 1088) 0) (on-key-field k))
+    (true (on-key-view k))))
 
 (defn enter-typing [] : I32
   (do (slot-set 3 1)
@@ -2111,6 +2637,7 @@
 (defn on-text [(t : String @ Region)] : I32
   (cond
     ((= (slot-get 3) 1) (type-text t))
+    ((>= (slot-get 1088) 0) (fm-type t))
     ((string/str-eq? t ":") (enter-typing))
     (true 0)))
 
@@ -2163,8 +2690,26 @@
   (do (pg-log "smoke-enter: activate selected link")
       (activate-link)))
 
+(defn smoke-scroll [(k : I32) (dest : Arena @ Region)] : I32
+  (do (on-key k dest)
+      (pg-log-n "smoke-keys: scroll=" (slot-get 1) dest)
+      (pg-log-n "smoke-keys: total=" (slot-get 1098) dest)
+      0))
+
+(defn smoke-type [] : I32
+  (do (pg-log "smoke-form: typing") (fm-type "hello world & co")))
+
 (defn smoke-hop [(frames : I32) (limit : I32) (dest : Arena @ Region)] : I32
   (cond
+    ((and (> limit 0) (= frames 30) (= (slot-get 17) 4)) (move-win 48 24))
+    ((and (> limit 0) (= frames 60) (= (slot-get 17) 4)) (move-win 48 24))
+    ((and (> limit 0) (= frames 40) (= (slot-get 17) 5)) (on-click 20 20))
+    ((and (> limit 0) (= frames 60) (= (slot-get 17) 5)) (smoke-type))
+    ((and (> limit 0) (= frames 80) (= (slot-get 17) 5)) (on-key (key-return) dest))
+    ((and (> limit 0) (= frames 30) (= (slot-get 17) 7)) (smoke-scroll 1073741902 dest))
+    ((and (> limit 0) (= frames 40) (= (slot-get 17) 7)) (smoke-scroll 1073741901 dest))
+    ((and (> limit 0) (= frames 50) (= (slot-get 17) 7)) (smoke-scroll 1073741899 dest))
+    ((and (> limit 0) (= frames 60) (= (slot-get 17) 7)) (smoke-scroll 1073741898 dest))
     ((and (> limit 0) (= frames 20) (> (linebuf-len) 0)) (hop dest))
     ((and (> limit 0) (= frames 60) (= (slot-get 17) 1)) (smoke-click))
     ((and (> limit 0) (= frames 60) (= (slot-get 17) 2)) (smoke-key 1))
@@ -2309,6 +2854,174 @@
           (img-load k &mut fr))))
     0))
 
+;; ---- form submission: GET appends ?name=value&..., POST sends the same urlencoded body ----
+;; The encoded pairs are built in the line buffer (1023 bytes max: a bigger form is refused, not truncated).
+(defn lb-clear [] : I32
+  (do (linebuf-clear) 0))
+
+(defn lb-add [(s : String @ Region)] : I32
+  (do (linebuf-append s) 0))
+
+(defn hex-ch [(n : I32)] : I32
+  (if (< n 10) (+ 48 n) (+ 55 n)))
+
+(defn fm-enc-ch [(c : I32) (dest : Arena @ Region)] : I32
+  (cond
+    ((or (letter? c) (or (digit? c) (or (= c 45) (or (= c 46) (or (= c 95) (= c 126))))))
+     (lb-add (string/char-from-code c dest)))
+    ((= c 32) (lb-add "+"))
+    (true (let [a (lb-add "%")
+                b (lb-add (string/char-from-code (hex-ch (/ c 16)) dest))]
+            (lb-add (string/char-from-code (hex-ch (mod c 16)) dest))))))
+
+(defn fm-ent-code [(p : String @ Region) (i : I32) (e : I32)] : I32
+  (if (= (string/char-at p i) 38)
+    (let [pk (amp-ent p i e)]
+      (if (and (> pk 0) (< (mod pk 4096) 128)) pk 0))
+    0))
+
+;; an attribute value as sent: &amp; &quot; &#39; ... are decoded first
+(defn fm-enc-page [(p : String @ Region) (s : I32) (e : I32) (dest : Arena @ Region)] : I32
+  (loop [i s]
+    (if (>= i e)
+      0
+      (let [pk (fm-ent-code p i e)
+            x (fm-enc-ch (if (> pk 0) (mod pk 4096) (string/char-at p i)) dest)]
+        (recur (+ i (if (> pk 0) (/ pk 4096) 1)))))))
+
+(defn fm-enc-store [(j : I32) (dest : Arena @ Region)] : I32
+  (loop [i 0]
+    (if (>= i (fm-get j 1))
+      0
+      (let [x (fm-enc-ch (fm-ch j i) dest)] (recur (+ i 1))))))
+
+(defn fm-enc-value [(p : String @ Region) (j : I32) (kind : I32) (ne : I32) (te : I32) (dest : Arena @ Region)] : I32
+  (if (or (= kind 1) (= kind 2))
+    (fm-enc-store j dest)
+    (let [vs (attr-start p ne te "value=")
+          ve (if (< vs 0) -1 (href-end p vs te))]
+      (if (< ve 0)
+        (if (or (= kind 4) (= kind 5)) (lb-add "on") 0)
+        (fm-enc-page p vs ve dest)))))
+
+(defn fm-append-pair [(p : String @ Region) (j : I32) (kind : I32) (ns : I32) (nee : I32) (ne : I32) (te : I32)
+                      (dest : Arena @ Region)] : I32
+  (let [sp (if (> (linebuf-len) 0) (lb-add "&") 0)
+        a (fm-enc-page p ns nee dest)
+        b (lb-add "=")]
+    (fm-enc-value p j kind ne te dest)))
+
+(defn fm-include [(j : I32) (trig : I32) (kind : I32) (nee : I32)] : I32
+  (cond
+    ((< nee 0) 0)
+    ((= kind 6) (if (= j trig) 1 0))
+    ((or (= kind 4) (= kind 5)) (fm-get j 2))
+    (true 1)))
+
+(defn fm-pair [(p : String @ Region) (n : I32) (j : I32) (trig : I32) (dest : Arena @ Region)] : I32
+  (let [pos (fm-get j 0)
+        te (find-in p 62 pos n)
+        ne (if (< te 0) -1 (name-end p (+ pos 1) te))
+        ns (if (< ne 0) -1 (attr-start p ne te "name="))
+        nee (if (< ns 0) -1 (href-end p ns te))
+        kind (fm-get j 4)]
+    (if (= (fm-include j trig kind nee) 1)
+      (fm-append-pair p j kind ns nee ne te dest)
+      0)))
+
+(defn fm-collect [(p : String @ Region) (n : I32) (fpos : I32) (trig : I32) (dest : Arena @ Region)] : I32
+  (loop [j 0]
+    (if (>= j (slot-get 1089))
+      0
+      (let [x (if (= (fm-get j 3) fpos) (fm-pair p n j trig dest) 0)]
+        (recur (+ j 1))))))
+
+(defn self-url [(dest : Arena @ Region)] : String
+  (string/substring (cururl-get) 0 (path-end (cururl-get)) dest))
+
+(defn fm-go-get [(base : String @ Region) (dest : Arena @ Region)] : I32
+  (let [sep (if (>= (find-char base 63 0) 0) "&" "?")
+        u (string/concat (string/concat base sep dest) (linebuf-get) dest)]
+    (go-link u dest)))
+
+(defn fm-go-post [(base : String @ Region) (dest : Arena @ Region)] : I32
+  (do (pg-log (string/concat "form: POST " base dest))
+      (slot-set 1095 1)
+      (go-link base dest)))
+
+(defn fm-send [(p : String @ Region) (n : I32) (fpos : I32) (k : I32) (base : String @ Region) (post : I32)
+               (dest : Arena @ Region)] : I32
+  (let [c (lb-clear)
+        x (fm-collect p n fpos k dest)]
+    (cond
+      ((> (linebuf-len) 1000) (do (pg-log "form: too large to send (limit ~1000 bytes encoded)") 0))
+      ((= post 1) (fm-go-post base dest))
+      (true (fm-go-get base dest)))))
+
+(defn fm-go [(p : String @ Region) (n : I32) (fpos : I32) (te : I32) (k : I32) (dest : Arena @ Region)] : I32
+  (let [ne (name-end p (+ fpos 1) te)
+        as (attr-start p ne te "action=")
+        ae (if (< as 0) -1 (href-end p as te))
+        ms (attr-start p ne te "method=")
+        post (if (< ms 0) 0 (if (or (= (string/char-at p ms) 112) (= (string/char-at p ms) 80)) 1 0))
+        act (if (>= ae 0) (resolve-href (amp-fix (string/substring p as ae dest) dest) dest) "")
+        base (if (> (string/length act) 0) act (self-url dest))]
+    (if (= (has-prefix base "http") 0)
+      (do (pg-log "form: no http(s) target, nothing sent") 0)
+      (fm-send p n fpos k base post dest))))
+
+(defn fm-run [(page : String @ Region) (k : I32) (dest : Arena @ Region)] : I32
+  (let [p (cur-page page)
+        n (cur-end page)
+        fpos (fm-get k 3)
+        te (if (< fpos 0) -1 (find-in p 62 fpos n))]
+    (if (< te 0)
+      (do (pg-log "form: control is not inside a <form>") 0)
+      (fm-go p n fpos te k dest))))
+
+(defn fm-submit [(page : String @ Region)] : I32
+  (let [k (slot-get 1096)
+        d (slot-set 1096 -1)]
+    (if (< k 0)
+      0
+      (with-arena [fr :region/scratch 65536]
+        (fm-run page k &mut fr)))))
+
+;; typed text (SDL text input) and keys while a field has focus
+(defn fm-append [(k : I32) (c : I32)] : I32
+  (let [n (fm-get k 1)]
+    (if (and (>= c 32) (and (< c 127) (< n 32)))
+      (do (fm-put k n c) (fm-set k 1 (+ n 1)) (slot-set 2 1) 0)
+      0)))
+
+(defn fm-type [(t : String @ Region)] : I32
+  (let [k (slot-get 1088)
+        n (string/length t)]
+    (loop [i 0]
+      (if (>= i n)
+        0
+        (let [x (fm-append k (string/char-at t i))] (recur (+ i 1)))))))
+
+(defn fm-back [] : I32
+  (let [k (slot-get 1088)
+        n (fm-get k 1)]
+    (if (> n 0) (do (fm-set k 1 (- n 1)) (slot-set 2 1) 0) 0)))
+
+(defn fm-unfocus [] : I32
+  (do (slot-set 1088 -1) (slot-set 2 1) 0))
+
+(defn on-key-field [(k : I32)] : I32
+  (cond
+    ((= k (key-return)) (do (slot-set 1096 (slot-get 1088)) 0))
+    ((= k (key-backspace)) (fm-back))
+    ((or (= k 27) (= k 9)) (fm-unfocus))
+    (true 0)))
+
+(defn move-win [(dx : I32) (dy : I32)] : I32
+  (do (pg-log "window: move")
+      (sdl2-raw-move-window (slot-get 1097) dx dy)
+      0))
+
 (defn frame-loop [(ren : I32) (page : String @ Region) (n : I32) (win-w : I32) (win-h : I32)
                   (limit : I32) (dest : Arena @ Region)] : I32
   (let [cols (/ (- win-w 24) 12)
@@ -2324,7 +3037,8 @@
                 p2 (pump-static n)
                 p3 (present-or-wait ren page n cols rows win-w win-h)
                 p4 (resolve-click page dest)
-                p5 (ensure-visible rows)]
+                p5 (ensure-visible rows)
+                p6 (fm-submit page)]
             (recur (+ frames 1))))))))
 
 (defn pellegrino-run [(arg : String @ Region)] : I32
@@ -2337,12 +3051,17 @@
             sclk (has-prefix arg "--smoke-click=")
             stab (has-prefix arg "--smoke-tab=")
             stog (has-prefix arg "--smoke-toggle=")
+            smv (has-prefix arg "--smoke-move=")
+            sfm (has-prefix arg "--smoke-form=")
+            sky (has-prefix arg "--smoke-keys=")
+            sx (if (or (= smv 1) (or (= sfm 1) (= sky 1))) 1 0)
             sp (if (= snav 1) (find-char arg 32 12) -1)
             url (cond
                   ((= surl 1) (string/substring arg 12 (string/length arg) &mut a))
                   ((= sclk 1) (string/substring arg 14 (string/length arg) &mut a))
                   ((= stab 1) (string/substring arg 12 (string/length arg) &mut a))
                   ((= stog 1) (string/substring arg 15 (string/length arg) &mut a))
+                  ((= sx 1) (string/substring arg 13 (string/length arg) &mut a))
                   ((and (= snav 1) (> sp 0)) (string/substring arg 12 sp &mut a))
                   (true arg))
             pre (if (and (= snav 1) (> sp 0))
@@ -2372,10 +3091,15 @@
                         (slot-set 296 -1)
                         (slot-set 298 -1)
                         (slot-set 26 (if (= isurl 1) 0 (md-path? url (string/length url))))
-                        (slot-set 17 (if (= stog 1) 3 (if (= stab 1) 2 sclk)))
+                        (slot-set 17 (if (= smv 1) 4 (if (= sfm 1) 5 (if (= sky 1) 7 (if (= stog 1) 3 (if (= stab 1) 2 sclk))))))
+                        (slot-set 1097 win)
+                        (slot-set 1088 -1)
+                        (slot-set 1096 -1)
+                        (slot-set 1091 -1)
+                        (slot-set 1094 -1)
                         (clear-click)
                         (if (= isurl 1) (start-nav url &mut a) 0)
-                        (frame-loop ren page n 1280 720 (if (or smoke (= surl 1) (= snav 1) (= sclk 1) (= stab 1) (= stog 1)) 120 0) &mut a)
+                        (frame-loop ren page n 1280 720 (if (= sx 1) 400 (if (or smoke (= surl 1) (= snav 1) (= sclk 1) (= stab 1) (= stog 1)) 120 0)) &mut a)
                         (sdl2-raw-destroy-renderer ren)
                         (sdl2-raw-destroy-window win)
                         (pg-log "clean exit")

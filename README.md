@@ -30,7 +30,7 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   A TLS stream that ends without a close_notify (possible truncation) is flagged in the status bar and the
   log instead of being presented as a complete page; navigating away closes the stream being left.
 - Source = live URL, embedded page (default), or a file path: `pellegrino path/to/page.html`.
-- Keys: `:` address bar, Up/Down/Home/End or mouse wheel to scroll, Esc/q to quit.
+- Keys: `:` address bar, Up/Down/PageUp/PageDown/Home/End or mouse wheel to scroll, Shift+J/L/I/K move the window, Esc/q to quit.
 - **No malloc**: the PARENA runtime is built with `-DPARENA_NO_MALLOC` (static pool); the C host is `main()`
   and log redirection only (`pellegrino_host.c`, ~25 lines).
 - **Real log files**: `pellegrino.log` (engine), `pellegrino.out.log`, `pellegrino.err.log` next to the
@@ -80,6 +80,15 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   WebP/SVG, no CSS `background-image`, images are not links-aware (a click on one is just a click). Verified live
   over plain HTTP with RGBA/RGB/palette fixtures and a screenshot; the HTTPS image path is the same code behind
   `stream-connect-tls` but was not exercised on this box (no mbedTLS dev).
+
+- **Forms, entities, keys (v1.6):** `<form>` with text/password/hidden/checkbox/radio/submit `<input>` and `<button>`;
+  click to focus, type, Enter or a button submits as **GET** (query string) or **POST**
+  (`application/x-www-form-urlencoded` body). Limits: 24 controls, 32-byte values, ~1000 bytes encoded, no `<textarea>`/
+  `<select>`/file/validation/multipart, one line per control. HTML entities and curly quotes/dashes decode to ASCII
+  look-alikes. **PageUp/PageDown/Home/End** scroll (End = the last screen); **Shift+J/L/I/K** move the window
+  (48 px). `<html>`/`<body>` styling (background, color, margin, padding, border, width) works; the canvas takes
+  `<html>`'s background, else `<body>`'s. Verified live over plain HTTP under Xvfb; the HTTPS form path is the same
+  code but untested here.
 
 **Not built yet** (see [NORTHSTAR.md](NORTHSTAR.md))
 - HTTP/1.0 only (no chunked/keep-alive/compression), HTTP/2, HTTP/3/QUIC (mbedTLS has no QUIC hooks, so

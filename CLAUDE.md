@@ -37,3 +37,7 @@ Read the monorepo root `CLAUDE.md` (The Emily Way) first; this file is repo-spec
 - Images (v1.5): img entries live in slots 700+4k (see header); fetch is `img-pump` (frame loop), only when the page
   stream is closed, via PARENA's stream bank 1; `stream-buf` is a C string -- never read image bytes through it, use
   `stream-copy-bytes`. Cap w*h at 262144: decode memory is ~5x the pixel bytes out of the static pool.
+- Forms (v1.6): control entries at slots 1100+14k (header comment above `fm-base`); global form slots 1086-1098.
+  `PARENA_SLOTS` is 2048 now. A POST is "encoded body in the line buffer + slot 1095"; `start-nav` clears the flag
+  after dispatch so redirects go back to GET. `string/char-at` is a *signed* char -- use `byte-at` for UTF-8.
+  Window move needs `sdl2-raw-move-window` (PARENA 575bdf5+).

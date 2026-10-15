@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-10-15 (v1.6 -- forms, POST, entities, scroll keys, window move)
+- **Forms**: `<form>` + `<input>` (text/search/email/...; password masked; hidden; checkbox; radio groups; submit/
+  button/reset-as-button) and `<button>`. Click a field to focus it, type (SDL text input), Backspace, Enter submits,
+  Esc/Tab unfocus. Submission is `application/x-www-form-urlencoded`: **GET** appends `?name=value&...` to the action
+  (or the current URL), **POST** sends the same bytes as the body with `Content-Length` (a redirect after a POST is
+  followed as GET). 24 controls per page, 32 bytes per text value, 1000 bytes encoded per submit (bigger is refused,
+  logged, not truncated). Values/names decode `&amp;` etc. before encoding. Not built: `<textarea>`, `<select>`,
+  `file`, `required`/validation, `enctype` multipart, `<label for>`, `disabled`.
+- **HTML entities** (`&amp; &lt; &gt; &quot; &apos; &nbsp; &#NN; &#xHH; &lsquo; &rsquo; &ldquo; &rdquo; &ndash;
+  &mdash; &hellip; &copy; &reg; &trade; &bull; &middot; &laquo; &raquo; &times; &rarr; &larr;`) and the UTF-8 forms
+  of curly quotes, dashes, ellipsis, nbsp decode to their ASCII look-alikes (the embedded font is ASCII only); other
+  non-ASCII characters show `?` instead of one garbage cell per byte. Links' `href` decode `&amp;` too.
+- **Keys**: PageUp/PageDown (a screen minus a row), Home, End (now the real last screen, not +20 rows), scroll is
+  clamped to the page. **Shift+J/L/I/K** move the borderless window left/right/up/down by 48 px
+  (`sdl2-raw-move-window`, PARENA `575bdf5`).
+- **Body/html styling**: `body`/`html` rules and `style=` (background, color, margin, padding, border, width) were
+  verified; the canvas now takes `<html>`'s background when set, else `<body>`'s.
+- Smoke section 19 (GET, POST body reaching the server, entities, scroll keys, window move). Verified live under
+  Xvfb with screenshots. Not run: the Bazel build, the HTTPS form path (same code behind `stream-connect-tls`).
 ## 2026-10-15 (v1.5 -- <img>, PNG)
 - `<img src>`: PNG (8-bit RGB/RGBA/palette, non-interlaced) fetched after the page stream closes, decoded by PARENA's
   `image/png`, held in the new `image/store` pixel pool, drawn scaled (nearest neighbour). Placeholder text while
