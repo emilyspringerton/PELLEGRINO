@@ -54,4 +54,7 @@ Read the monorepo root `CLAUDE.md` (The Emily Way) first; this file is repo-spec
   check the whole 0-4095 map. External CSS text lives in PARENA's static css store (`css-buf`); selectors and
   declarations are (source, start, end) ranges into the page or that store. Never fetch a sheet over TLS while the
   page's own TLS session is open (one session): https sheets wait for slot 4 < 0.
-
+- UA defaults (v1.10): `ua-v` sets a block's default margin rows; `margin-rows` collapses against the run of margin-only
+  blank rows just emitted (slot 1656 = run length, 1657 = the row it ended on). Slots 1655 = hash of `li` (nested list
+  test), 1658 = hash of `pre`, 1660 = HTML-document flag (whitespace collapsing, `soft-ws?`), 1661 = last logged rows.
+  Do not put a blank row back into `pre-break`: author resets depend on margins being the only source of gaps.

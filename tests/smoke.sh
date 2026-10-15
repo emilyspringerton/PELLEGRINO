@@ -277,6 +277,39 @@ absent "css: failed"
 # the max-width media rule never counts: 1 inline + 10 from ext.css, then +1 from the @import
 need "css: rules=12"
 
+echo "== 20c. UA default styling: margins collapse, whitespace collapses, author resets win"
+last_rows() { grep -o 'page: rows=[0-9]*' pellegrino.log | tail -1 | sed 's/.*=//'; }
+printf '<html><body><h1>T</h1><p>a</p><p>b</p><ul><li>x<ul><li>y</li></ul></li></ul><p>c</p></body></html>' > www/ua_min.html
+cat > www/ua_ws.html <<'HTML'
+<!doctype html>
+<html>
+  <body>
+    <h1>T</h1>
+    <p>a</p>
+    <p>
+       b
+    </p>
+    <ul>
+      <li>x
+        <ul>
+          <li>y</li>
+        </ul>
+      </li>
+    </ul>
+    <p>c</p>
+  </body>
+</html>
+HTML
+printf '<html><head><style>* { margin: 0; padding: 0 }</style></head><body><h1>T</h1><p>a</p><p>b</p><ul><li>x<ul><li>y</li></ul></li></ul><p>c</p></body></html>' > www/ua_reset.html
+run "--smoke-keys=http://127.0.0.1:$PORT/ua_min.html"; need "clean exit"; r_min=$(last_rows)
+run "--smoke-keys=http://127.0.0.1:$PORT/ua_ws.html"; need "clean exit"; r_ws=$(last_rows)
+run "--smoke-keys=http://127.0.0.1:$PORT/ua_reset.html"; need "clean exit"; r_reset=$(last_rows)
+echo "rows: minified=$r_min whitespace=$r_ws reset=$r_reset"
+[ -n "$r_min" ] && [ "$r_min" = "$r_ws" ] || { echo "FAIL: source whitespace changed the layout ($r_min vs $r_ws)"; exit 1; }
+[ -n "$r_reset" ] && [ "$r_reset" -lt "$r_min" ] || { echo "FAIL: a margin reset did not tighten the page ($r_reset vs $r_min)"; exit 1; }
+[ "$r_min" = "13" ] || { echo "FAIL: default margins drifted: rows=$r_min, expected 13"; exit 1; }
+[ "$r_reset" = "7" ] || { echo "FAIL: reset layout drifted: rows=$r_reset, expected 7"; exit 1; }
+
 echo "== 20b. css3: hostile sheets do not crash it"
 python3 - <<'PYEND'
 import random

@@ -875,6 +875,16 @@
             r (slot-set 33 (+ (slot-get 33) 1))]
         (recur (+ k 1))))))
 
+;; margin rows collapse with the margin rows emitted just before them: slot 1656 = length of the current run of
+;; margin-only blank rows, 1657 = the row the cursor stood on when it ended (anything drawn since moves the row on)
+(defn margin-rows [(n : I32) (upto : I32)] : I32
+  (let [t (if (= (slot-get 1657) (slot-get 33)) (slot-get 1656) 0)
+        e (if (> n t) (- n t) 0)
+        b (blank-rows e upto)]
+    (if (> n 0)
+      (do (slot-set 1656 (if (> n t) n t)) (slot-set 1657 (slot-get 33)))
+      0)))
+
 (defn hline [(y : I32)] : I32
   (let [ren (slot-get 38)
         d (slot-get 31)]
@@ -922,9 +932,34 @@
       (let [p (pop-entry)] (recur (+ k 1)))
       0)))
 
+;; HTML documents (an <html> or <body> was seen) collapse whitespace like a browser: slot 1660 = 1, slot 1658 =
+;; hash of "pre". A newline/space is then one space, and none at the start of a line or after another space.
+(defn pre-open [] : I32
+  (loop [d (slot-get 31)]
+    (if (< d 1)
+      0
+      (if (= (eget d 0) (slot-get 1658)) 1 (recur (- d 1))))))
+
+(defn soft-ws? [] : I32
+  (if (and (= (slot-get 1660) 1)
+           (and (= (slot-get 28) 0)
+                (and (not (hidden?))
+                     (and (= (pre-open) 0)
+                          (not (and (>= (tget 21) 1) (<= (tget 21) 3)))))))
+    1
+    0))
+
+(defn soft-skip? [(page : String @ Region) (i : I32)] : I32
+  (if (or (<= (slot-get 32) (tget 6))
+          (and (> i 0) (ws? (string/char-at page (- i 1)))))
+    1
+    0))
+
 (defn do-newline [] : I32
   (cond
     ((hidden?) (md-pop-line))
+    ((and (> (slot-get 1656) 0) (and (= (slot-get 1657) (slot-get 33)) (<= (slot-get 32) (tget 6))))
+     (md-pop-line))
     ((and (= (slot-get 635) 1) (<= (slot-get 32) (tget 6)))
      (do (slot-set 635 0) (md-pop-line)))
     (true (let [a (ensure-fill (slot-get 33))
@@ -1041,7 +1076,7 @@
         k))
     s))
 
-;; UA element ids (24 underline u/ins): 1-6 h1-h6, 7 p, 8 generic block, 9 li, 10 bold, 11 code, 12 em, 13 small, 14 big,
+;; UA element ids (25 dl, 26 dd, 27 figure; 24 underline u/ins): 1-6 h1-h6, 7 p, 8 generic block, 9 li, 10 bold, 11 code, 12 em, 13 small, 14 big,
 ;; 15 mark, 16 pre, 17 blockquote, 18 body/html, 19 font, 20 ul/ol, 21 hidden (template/svg/...), 23 dim (del/s), 0 plain inline
 (defn ua-id [(page : String @ Region) (a : I32) (b : I32)] : I32
   (cond
@@ -1081,19 +1116,19 @@
     ((= (word-eq page a b "form") 1) 8)
     ((= (word-eq page a b "table") 1) 8)
     ((= (word-eq page a b "tr") 1) 8)
-    ((= (word-eq page a b "dl") 1) 8)
-    ((= (word-eq page a b "dd") 1) 8)
+    ((= (word-eq page a b "dl") 1) 25)
+    ((= (word-eq page a b "dd") 1) 26)
     ((= (word-eq page a b "dt") 1) 8)
     ((= (word-eq page a b "address") 1) 8)
-    ((= (word-eq page a b "figure") 1) 8)
+    ((= (word-eq page a b "figure") 1) 27)
     ((= (word-eq page a b "figcaption") 1) 8)
     ((= (word-eq page a b "fieldset") 1) 8)
     ((= (word-eq page a b "legend") 1) 8)
     ((= (word-eq page a b "details") 1) 8)
     ((= (word-eq page a b "summary") 1) 8)
     ((= (word-eq page a b "hgroup") 1) 8)
-    ((= (word-eq page a b "menu") 1) 8)
-    ((= (word-eq page a b "dir") 1) 8)
+    ((= (word-eq page a b "menu") 1) 20)
+    ((= (word-eq page a b "dir") 1) 20)
     ((= (word-eq page a b "center") 1) 8)
     ((= (word-eq page a b "caption") 1) 8)
     ((= (word-eq page a b "thead") 1) 8)
@@ -1136,7 +1171,7 @@
     (true 0)))
 
 (defn ua-block? [(ua : I32)] : I32
-  (if (or (and (>= ua 1) (<= ua 9)) (= ua 16) (= ua 17) (= ua 18) (= ua 20)) 1 0))
+  (if (or (and (>= ua 1) (<= ua 9)) (or (= ua 16) (= ua 17) (= ua 18) (= ua 20) (and (>= ua 25) (<= ua 27)))) 1 0))
 
 (defn void-tag? [(page : String @ Region) (a : I32) (b : I32)] : I32
   (cond
@@ -1184,17 +1219,32 @@
             ((> dl 0) (recur (+ gt 1) (+ depth 1) (+ n (if (and (= depth 0) (= (fx-blk page lt gt) 1)) 1 0))))
             (true (recur (+ gt 1) depth n))))))))
 
+;; default vertical margins (rows of 18px; 1 row ~ 1em). Adjacent margins collapse (margin-rows), so a UA margin
+;; of 1 on both sides of a paragraph is one blank row between paragraphs, like a browser's 1em.
+(defn ua-v [(mt : I32) (mb : I32)] : I32
+  (do (tset 12 mt) (tset 14 mb) 0))
+
 (defn ua-h [(scale : I32) (bold : I32) (fg : I32) (mb : I32)] : I32
-  (do (tset 3 scale) (tset 4 bold) (tset 1 fg) (tset 14 mb) 0))
+  (do (tset 3 scale) (tset 4 bold) (tset 1 fg) (ua-v 1 1)))
+
+;; ul/ol/menu: 1em above and below, none when nested inside an li; slot 1655 = hash of "li" (set when one opens)
+(defn li-open [] : I32
+  (loop [d (- (slot-get 31) 1)]
+    (if (< d 1)
+      0
+      (if (= (eget d 0) (slot-get 1655)) 1 (recur (- d 1))))))
+
+(defn ua-list [] : I32
+  (do (tset 15 36) (if (= (li-open) 1) (ua-v 0 0) (ua-v 1 1))))
 
 (defn ua-code [] : I32
   (do (tset 1 11075486) (tset 2 2500134) 0))
 
 (defn ua-pre [] : I32
-  (do (tset 1 11075486) (tset 2 2105376) (tset 16 1) (tset 18 1) (tset 19 8) (tset 17 8) 0))
+  (do (ua-v 1 1) (tset 1 11075486) (tset 2 2105376) (tset 16 1) (tset 18 1) (tset 19 8) (tset 17 8) 0))
 
 (defn ua-quote [] : I32
-  (do (tset 1 11579568) (tset 8 2) (tset 9 6316128) (tset 22 1) (tset 15 12) (tset 19 8) 0))
+  (do (ua-v 1 1) (tset 1 11579568) (tset 8 2) (tset 9 6316128) (tset 22 1) (tset 15 12) (tset 19 8) 0))
 
 (defn ua-mark [] : I32
   (do (tset 1 0) (tset 2 16769126) 0))
@@ -1216,7 +1266,11 @@
     ((= ua 15) (ua-mark))
     ((= ua 16) (ua-pre))
     ((= ua 17) (ua-quote))
-    ((= ua 20) (tset 15 12))
+    ((= ua 7) (ua-v 1 1))
+    ((= ua 20) (ua-list))
+    ((= ua 25) (ua-v 1 1))
+    ((= ua 26) (tset 15 36))
+    ((= ua 27) (do (ua-v 1 1) (tset 15 36) (tset 13 36)))
     ((= ua 21) (tset 10 1))
     ((= ua 23) (do (tset 1 8421504) (deco-mark 21)))
     ((= ua 24) (deco-mark 20))
@@ -2477,7 +2531,7 @@
 (defn open-rows [(ua : I32)] : I32
   (if (hidden?)
     0
-    (let [a (blank-rows (tget 12) (- (slot-get 31) 1))
+    (let [a (margin-rows (tget 12) (- (slot-get 31) 1))
           bt (if (> (tget 8) 0)
                (if (row-vis? (slot-get 33)) (hline (row-y (slot-get 33))) 0)
                0)
@@ -2519,7 +2573,10 @@
         h (hash-range page ns ne)
         hc (head-close page ns ne)
         pre (if (= blk 1) (pre-break ua) 0)
-        ic (implied-close ua h)]
+        ic (implied-close ua h)
+        lk (if (= ua 9) (slot-set 1655 h) 0)
+        pk (if (= ua 16) (slot-set 1658 h) 0)
+        dk (if (= ua 18) (slot-set 1660 1) 0)]
     (if (>= (slot-get 31) 11)
       0
       (let [pu (push-entry h blk)
@@ -3307,9 +3364,7 @@
 
 ;; a heading or paragraph that starts right after bare inline text on the line gets the gap CSS margins give it
 (defn pre-break [(ua : I32)] : I32
-  (let [dirty (and (>= ua 1) (and (<= ua 7) (and (not (hidden?)) (> (slot-get 32) (tget 6)))))
-        e (end-line)]
-    (if dirty (blank-rows 1 (slot-get 31)) 0)))
+  (end-line))
 
 (defn open-named [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
   (cond
@@ -3343,9 +3398,11 @@
         ne (name-end page ns revealed)
         te (find-in page 62 ne revealed)
         m (slot-set 621 i)]
-    (if (or (= ne ns) (< te 0))
-      0
-      (open-named page ns ne te))))
+    (cond
+      ((and (= (string/char-at page ns) 33) (= (word-eq page (+ ns 1) (+ ns 8) "doctype") 1))
+       (slot-set 1660 1))
+      ((or (= ne ns) (< te 0)) 0)
+      (true (open-named page ns ne te)))))
 
 (defn close-top [] : I32
   (if (= (tget 11) 1)
@@ -3362,7 +3419,7 @@
              0)
         mb (tget 14)
         p (pop-entry)
-        r2 (if hid 0 (blank-rows mb (slot-get 31)))
+        r2 (if hid 0 (margin-rows mb (slot-get 31)))
         isk (and (> (slot-get 610) 0) (= (+ (slot-get 31) 1) (+ (slot-get 610) 1)))
         km (if (and isk (< (slot-get 614) (slot-get 33))) (slot-set 614 (slot-get 33)) 0)]
     (if hid 0 (slot-set 32 (tget 6)))))
@@ -3493,6 +3550,7 @@
       (slot-set 619 0) (slot-set 620 0) (slot-set 1091 -1) (slot-set 1094 -1)
       (slot-set 631 0) (slot-set 632 0) (slot-set 633 0) (slot-set 634 0) (slot-set 635 0)
       (slot-set 640 0) (slot-set 641 0) (slot-set 1740 0) (slot-set 1639 0)
+      (slot-set 1655 0) (slot-set 1656 0) (slot-set 1657 -1) (slot-set 1658 0) (slot-set 1660 0)
       (xset 0 3 0) (xset 0 7 0) (xset 0 8 0)
       (init-root width)
       (if (= (slot-get 24) 1) (scan-styles page start revealed) 0)
@@ -3509,6 +3567,16 @@
           a (slot-set 298 n)]
       (log-rules-n n))))
 
+(defn log-height-n [(n : I32)] : I32
+  (with-arena [fr :region/scratch 256]
+    (pg-log-n "page: rows=" n &mut fr)))
+
+;; the laid-out height in rows, logged when it changes (what tests/smoke.sh asserts UA default margins against)
+(defn log-height [] : I32
+  (if (= (slot-get 1661) (slot-get 33))
+    0
+    (do (slot-set 1661 (slot-get 33)) (log-height-n (slot-get 33)))))
+
 (defn page-bg-changed [] : I32
   (do (slot-set 296 (slot-get 297)) (slot-set 2 1) 0))
 
@@ -3516,7 +3584,8 @@
   (let [a (slot-set 22 ln)
         t (slot-set 1098 (slot-get 33))
         b (if (= (slot-get 297) (slot-get 296)) 0 (page-bg-changed))
-        c (log-rules)]
+        c (log-rules)
+        d (log-height)]
     (slot-get 33)))
 
 ;; tag kinds at '<': 1 script/style/title (content skipped), 3 <a ...>, 4 </a>, 5 other closer, 6 comment, 0 open
@@ -3709,6 +3778,10 @@
                  ((= k 4) (let [t (close-tag page i revealed)] (recur (+ i 1) 1 -1 -1 ln)))
                  ((= k 5) (let [t (close-tag page i revealed)] (recur (+ i 1) 1 hs he ln)))
                  (true (let [t (open-tag page i revealed)] (recur (+ i 1) 1 hs he ln))))))
+            ((and (or (= c 10) (or (= c 32) (= c 9))) (= (soft-ws?) 1))
+             (let [p (if (= (soft-skip? page i) 1) 0 (put-char 32 i revealed hs he (- ln 1)))
+                   q (if (= c 10) (md-pop-line) 0)]
+               (recur (+ i 1) 0 hs he ln)))
             ((= c 10) (let [t (do-newline)] (recur (+ i 1) 0 hs he ln)))
             ((= c 13) (recur (+ i 1) 0 hs he ln))
             ((> (ent-pack page i revealed) 0)

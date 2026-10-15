@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-10-15 (v1.10 -- UA default styling)
+- Founder real-time: "can we ensure we have some default styling on dom elements? ... in the case where the dev is
+  relying on some of the defaults i think those cases are showing weird in places".
+- **Default margins** for h1-h6, `p`, `ul`/`ol`/`menu`/`dir` (none when nested in an `li`), `pre`, `blockquote`, `dl`,
+  `figure`, plus indents for lists/`dd`/`figure`. Before, only headings had a bottom margin and paragraph gaps came
+  from the source newline between tags -- so minified HTML had none and pretty-printed HTML had double.
+- **Margins collapse** (adjacent vertical margins take the max); an author `margin` replaces the UA value, so a
+  `* { margin: 0 }` reset now removes every gap (the old implicit blank row before a block is gone).
+- **HTML whitespace collapsing** in documents (`<!doctype>`/`<html>`/`<body>`): newlines/tabs/space runs are one space
+  and disappear at line starts; `<pre>` and markdown line entries keep them. Plain text and markdown pages are
+  untouched. A newline right after a block's margin no longer adds a second gap in fragments.
+- New log line `page: rows=N` (laid-out height, logged on change); smoke section 20c asserts minified == pretty-printed
+  == 13 rows and the reset page == 7.
+
 ## 2026-10-15 (v1.9 -- CSS3, asynchronous stylesheets)
 - Founder real-time: "ensure we support css3 on an asynchronous basis; remember embrace the layout shifts".
 - **External stylesheets, async**: `<link rel=stylesheet>` (quoted or unquoted attributes, `media=`) and `@import` are
