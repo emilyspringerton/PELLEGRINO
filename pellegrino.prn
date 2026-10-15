@@ -129,6 +129,7 @@
 ;;   4 bold, 5 block-left px, 6 content-left px, 7 right px, 8 border w, 9 border color, 10 display:none,
 ;;   11 block, 12 margin-top rows, 13 margin-right px, 14 margin-bottom rows, 15 margin-left px,
 ;;   16-19 padding t/r/b/l, 21 md marker (1 line, 2 bold, 3 code, 4 fence), 22 left-bar-only border,
+;;   20 content width px (-1 auto; margin-left/right 100000 = auto),
 ;;   23 content-right px (wrap edge: right minus border and right padding).
 
 (defn lc [(c : I32)] : I32
@@ -353,7 +354,7 @@
           (if (or (>= a ve) (>= (slot-get 608) 4))
             (slot-get 608)
             (let [b (tok-end page a ve)
-                  st (push-len (parse-len page a b))]
+                  st (push-len (if (= (word-eq page a b "auto") 1) 100000 (parse-len page a b)))]
               (recur b)))))))
 
 ;; ---- style stack ----
@@ -386,7 +387,7 @@
       (eset 0 5 0) (eset 0 6 0) (eset 0 7 width) (eset 0 8 0) (eset 0 9 0)
       (eset 0 10 0) (eset 0 11 1) (eset 0 12 0) (eset 0 13 0) (eset 0 14 0)
       (eset 0 15 0) (eset 0 16 0) (eset 0 17 0) (eset 0 18 0) (eset 0 19 0)
-      (eset 0 21 0) (eset 0 22 0) (eset 0 23 width)
+      (eset 0 20 -1) (eset 0 21 0) (eset 0 22 0) (eset 0 23 width)
       0))
 
 (defn pop-entry [] : I32
@@ -405,7 +406,7 @@
         (eset d 8 0) (eset d 9 8421504) (eset d 10 0) (eset d 11 blk)
         (eset d 12 0) (eset d 13 0) (eset d 14 0) (eset d 15 0)
         (eset d 16 0) (eset d 17 0) (eset d 18 0) (eset d 19 0)
-        (eset d 21 0) (eset d 22 0)
+        (eset d 20 -1) (eset d 21 0) (eset d 22 0)
         0)))
 
 ;; ---- filling: block backgrounds and borders, per row, lazily ----
@@ -696,6 +697,29 @@
       ((= (word-eq page a b "inline-block") 1) (tset 11 0))
       (true 0))))
 
+(defn rows-m [(px : I32)] : I32
+  (if (>= px 100000) 0 (rows-of px)))
+
+;; width value -> px; a % is of the parent's content width pw; -1 when auto / not a length
+(defn parse-width [(page : String @ Region) (vs : I32) (ve : I32) (pw : I32)] : I32
+  (let [s (skip-ws page vs ve)
+        e (trim-end page s ve)]
+    (cond
+      ((>= s e) -1)
+      ((not (digit? (string/char-at page s))) -1)
+      ((>= (find-in page 37 s e) 0) (/ (* (scan-int page s e) pw) 100))
+      (true (len-num page s e)))))
+
+;; width (mode 0) / max-width (mode 1): content-box px, stored in field 20
+(defn set-width [(page : String @ Region) (vs : I32) (ve : I32) (mode : I32)] : I32
+  (let [v (parse-width page vs ve (- (tget 23) (tget 5)))
+        cur (tget 20)]
+    (cond
+      ((< v 0) 0)
+      ((= mode 0) (tset 20 v))
+      ((or (< cur 0) (> cur v)) (tset 20 v))
+      (true 0))))
+
 ;; margin / padding shorthand: base 12 (margin) or 16 (padding); order is top right bottom left
 (defn box-set [(base : I32)] : I32
   (let [n (slot-get 608)
@@ -703,14 +727,16 @@
         v1 (slot-get 605)
         v2 (slot-get 606)
         v3 (slot-get 607)
-        r (if (>= n 2) v1 v0)
-        b (if (>= n 3) v2 v0)
-        l (if (>= n 4) v3 (if (>= n 2) v1 v0))]
+        r0 (if (>= n 2) v1 v0)
+        b0 (if (>= n 3) v2 v0)
+        l0 (if (>= n 4) v3 (if (>= n 2) v1 v0))
+        r (if (and (>= r0 100000) (= base 16)) 0 r0)
+        l (if (and (>= l0 100000) (= base 16)) 0 l0)]
     (if (<= n 0)
       0
-      (do (tset base (rows-of v0))
+      (do (tset base (rows-m v0))
           (tset (+ base 1) r)
-          (tset (+ base 2) (rows-of b))
+          (tset (+ base 2) (rows-m b0))
           (tset (+ base 3) l)
           0))))
 
@@ -722,6 +748,9 @@
   (if (< v 0)
     0
     (tset field (if (= rowsy 1) (rows-of v) v))))
+
+(defn margin-side [(page : String @ Region) (vs : I32) (ve : I32) (field : I32)] : I32
+  (side-set field 0 (if (= (word-eq page vs ve "auto") 1) 100000 (parse-len page vs ve))))
 
 ;; border: [width] [style] [color]; `none` / `0` removes it
 (defn set-border [(page : String @ Region) (vs : I32) (ve : I32)] : I32
@@ -744,14 +773,16 @@
     ((= (word-eq page ns ne "margin") 1) (box-lens page vs ve 12))
     ((= (word-eq page ns ne "padding") 1) (box-lens page vs ve 16))
     ((= (word-eq page ns ne "margin-top") 1) (side-set 12 1 (parse-len page vs ve)))
-    ((= (word-eq page ns ne "margin-right") 1) (side-set 13 0 (parse-len page vs ve)))
+    ((= (word-eq page ns ne "margin-right") 1) (margin-side page vs ve 13))
     ((= (word-eq page ns ne "margin-bottom") 1) (side-set 14 1 (parse-len page vs ve)))
-    ((= (word-eq page ns ne "margin-left") 1) (side-set 15 0 (parse-len page vs ve)))
+    ((= (word-eq page ns ne "margin-left") 1) (margin-side page vs ve 15))
     ((= (word-eq page ns ne "padding-top") 1) (side-set 16 1 (parse-len page vs ve)))
     ((= (word-eq page ns ne "padding-right") 1) (side-set 17 0 (parse-len page vs ve)))
     ((= (word-eq page ns ne "padding-bottom") 1) (side-set 18 1 (parse-len page vs ve)))
     ((= (word-eq page ns ne "padding-left") 1) (side-set 19 0 (parse-len page vs ve)))
     ((= (word-eq page ns ne "border") 1) (set-border page vs ve))
+    ((= (word-eq page ns ne "width") 1) (set-width page vs ve 0))
+    ((= (word-eq page ns ne "max-width") 1) (set-width page vs ve 1))
     (true 0)))
 
 ;; name: value; name: value ... in page[ds,de)
@@ -952,12 +983,27 @@
   (if (= blk 1)
     (let [d (slot-get 31)
           p (- d 1)
-          bl (+ (eget p 6) (tget 15))
           bw (tget 8)
+          chrome (+ (if (= (tget 22) 1) bw (* bw 2)) (+ (tget 19) (tget 17)))
+          mlr (tget 15)
+          mrr (tget 13)
+          autol (>= mlr 100000)
+          autor (>= mrr 100000)
+          ml (if autol 0 mlr)
+          mr (if autor 0 mrr)
+          pl (eget p 6)
+          avail (- (- (eget p 23) pl) (+ ml mr))
+          wc (tget 20)
+          outer0 (if (>= wc 0) (+ wc chrome) avail)
+          outer (if (> outer0 avail) avail (if (< outer0 chrome) chrome outer0))
+          free (- avail outer)
+          off (if (and autol autor) (/ free 2) (if autol free 0))
+          bl (+ pl (+ ml off))
+          right (if (>= wc 0) (+ bl outer) (- (eget p 23) mr))
           a (tset 5 bl)
           b (tset 6 (+ bl (+ bw (tget 19))))
-          c (tset 7 (- (eget p 7) (tget 13)))
-          w (tset 23 (- (tget 7) (+ bw (tget 17))))]
+          c (tset 7 right)
+          w (tset 23 (- right (+ bw (tget 17))))]
       0)
     0))
 

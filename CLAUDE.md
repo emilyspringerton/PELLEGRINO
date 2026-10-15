@@ -28,3 +28,6 @@ Read the monorepo root `CLAUDE.md` (The Emily Way) first; this file is repo-spec
   VS0 quirks found there: a `let` inside a `cond` arm of a non-loop function is rejected (use a helper fn);
   two sequential `loop`s in one function must not reuse a variable name (C redefinition); `(+ a b c)` is rejected
   (nest it). Toggle keys: F12/`x` css, F11/`p` markdown (SDLK_F11/F12 are the literal 1073741892/3).
+- Box model (v1.3): style-stack field 20 = content width px (-1 auto); margin-left/right `auto` is stored as the
+  sentinel 100000 and resolved in `finish-geom` (children now wrap at the parent's slot-23 edge, so parent padding/border
+  is respected). No `height` (the 24-field stack stride is full).

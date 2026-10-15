@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-15 (v1.3 -- box model: width, max-width, auto margins)
+- `width` / `max-width` (px, em, % of the parent's content width; content-box, clamped to the parent) and
+  `margin-left/right: auto` / `margin: 0 auto` centring. Children now wrap at the parent's content edge
+  (parent padding + border respected). Still re-laid-out every frame: it shifts as bytes land, on purpose.
+- Verified by eye in an Xvfb screenshot (400px box, 50% centred, max-width cap, nested %); not in the smoke suite
+  (it asserts logs, not pixels), and the Bazel suite was not run on this box.
+
 ## 2026-10-15 (v1.2 -- CSS-lite, box model, headings, markdown)
 - **CSS-lite**: `<style>` rules (tag/.class/#id/*), inline `style=`, `<font color>`/`bgcolor`; hex (`#rgb`/`#rrggbb`),
   `rgb()` and 23 named colors; `color`, `background`, `font-size`, `font-weight`, `display`, `margin`, `padding`, `border`.
