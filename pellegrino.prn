@@ -122,6 +122,9 @@
 ;; Slots: 24 css on, 25 markdown on, 26 doc is markdown, 27 last row filled, 28 md code fence open,
 ;; 29 hidden-from (style-stack index, 0 none), 30 rule count, 31 style-stack top, 32 cursor col (px),
 ;; 33 cursor row, 34 scroll, 35 visible rows, 36 x0, 37 y0, 38 renderer, 39 content width,
+;; Flexbox (one level): 610 container stack index (0 none), 611 child count, 612 start row, 613 child index,
+;; 614 rows painted so far by closed children, 615 gap px, 616 children entered, 617 revealed, 618 tag end,
+;; 619 gap value, 620 gap owner (stack index).
 ;; 296 page background in use, 297 page background found this pass, 298 rule count last logged,
 ;; 600-608 scratch (md link range, scan-int end, lengths).
 ;; Rules: slot 40+4k = kind (1 tag, 2 class, 3 id, 5 *), hash, decl start, decl end   (k < 64)
@@ -390,9 +393,17 @@
       (eset 0 20 -1) (eset 0 21 0) (eset 0 22 0) (eset 0 23 width)
       0))
 
+(defn flex-reset [] : I32
+  (do (slot-set 610 0) (slot-set 616 0) (slot-set 614 0) 0))
+
+(defn gap-reset [] : I32
+  (do (slot-set 620 0) (slot-set 619 0) 0))
+
 (defn pop-entry [] : I32
   (let [sp (slot-get 31)
-        a (if (= (slot-get 29) sp) (slot-set 29 0) 0)]
+        a (if (= (slot-get 29) sp) (slot-set 29 0) 0)
+        f (if (= (slot-get 610) sp) (flex-reset) 0)
+        g (if (= (slot-get 620) sp) (gap-reset) 0)]
     (if (> sp 0) (slot-set 31 (- sp 1)) 0)))
 
 ;; new entry inheriting fg/scale/bold; inline entries inherit an inline parent's bg too
@@ -432,11 +443,18 @@
       (if (> (eget d 8) 0) (bars ren d x y w h) 0))
     0))
 
+;; first style-stack entry to paint on row r: flex children after the first skip the container chain on rows
+;; the earlier columns already painted
+(defn fill-start [(r : I32)] : I32
+  (if (and (and (> (slot-get 610) 0) (>= (slot-get 616) 2)) (< r (slot-get 614)))
+    (+ (slot-get 610) 1)
+    1))
+
 ;; draw bg/borders of row r for style-stack entries 1..upto (h = pixel height of that line)
 (defn fill-row [(r : I32) (upto : I32) (h : I32)] : I32
   (if (or (< r (slot-get 34)) (>= r (+ (slot-get 34) (slot-get 35))))
     0
-    (loop [d 1]
+    (loop [d (fill-start r)]
       (if (> d upto)
         0
         (let [x (fill-ent d r h)] (recur (+ d 1)))))))
@@ -626,6 +644,46 @@
 (defn ua-block? [(ua : I32)] : I32
   (if (or (and (>= ua 1) (<= ua 9)) (= ua 16) (= ua 17) (= ua 18) (= ua 20)) 1 0))
 
+(defn void-tag? [(page : String @ Region) (a : I32) (b : I32)] : I32
+  (cond
+    ((= (word-eq page a b "br") 1) 1)
+    ((= (word-eq page a b "hr") 1) 1)
+    ((= (word-eq page a b "img") 1) 1)
+    ((= (word-eq page a b "meta") 1) 1)
+    ((= (word-eq page a b "link") 1) 1)
+    ((= (word-eq page a b "input") 1) 1)
+    ((= (word-eq page a b "base") 1) 1)
+    ((= (word-eq page a b "wbr") 1) 1)
+    (true 0)))
+
+;; tag at page[lt..gt]: -1 closer, +1 opener that needs a closer, 0 comment/void/self-closing
+(defn fx-delta [(page : String @ Region) (lt : I32) (gt : I32)] : I32
+  (let [c1 (string/char-at page (+ lt 1))
+        ne (name-end page (+ lt 1) gt)]
+    (cond
+      ((= c1 47) -1)
+      ((not (letter? c1)) 0)
+      ((= (string/char-at page (- gt 1)) 47) 0)
+      ((= (void-tag? page (+ lt 1) ne) 1) 0)
+      (true 1))))
+
+(defn fx-blk [(page : String @ Region) (lt : I32) (gt : I32)] : I32
+  (ua-block? (ua-id page (+ lt 1) (name-end page (+ lt 1) gt))))
+
+;; block-level direct children of the element whose tag ends at `from`, among the bytes revealed so far
+(defn flex-count [(page : String @ Region) (from : I32) (rev : I32)] : I32
+  (loop [k from depth 0 n 0]
+    (let [lt (find-in page 60 k rev)
+          gt (if (< lt 0) -1 (find-in page 62 lt rev))]
+      (if (< gt 0)
+        n
+        (let [dl (fx-delta page lt gt)]
+          (cond
+            ((and (< dl 0) (= depth 0)) n)
+            ((< dl 0) (recur (+ gt 1) (- depth 1) n))
+            ((> dl 0) (recur (+ gt 1) (+ depth 1) (+ n (if (and (= depth 0) (= (fx-blk page lt gt) 1)) 1 0))))
+            (true (recur (+ gt 1) depth n))))))))
+
 (defn ua-h [(scale : I32) (bold : I32) (fg : I32) (mb : I32)] : I32
   (do (tset 3 scale) (tset 4 bold) (tset 1 fg) (tset 14 mb) 0))
 
@@ -686,6 +744,28 @@
       ((and (= (- b a) 3) (>= (string/char-at page a) 54) (<= (string/char-at page a) 57)) (tset 4 1))
       (true (tset 4 0)))))
 
+(defn flex-claim [(page : String @ Region)] : I32
+  (if (= (slot-get 610) 0)
+    (do (tset 11 1)
+        (slot-set 610 (slot-get 31))
+        (slot-set 613 0)
+        (slot-set 616 0)
+        (slot-set 614 0)
+        (slot-set 611 (flex-count page (+ (slot-get 618) 1) (slot-get 617)))
+        0)
+    (tset 11 1)))
+
+(defn flex-dir [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (if (and (= (slot-get 610) (slot-get 31)) (= (has-tok page vs ve "column") 1))
+    (do (slot-set 610 0) 0)
+    0))
+
+(defn set-gap [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (let [v (parse-len page vs ve)]
+    (if (< v 0)
+      0
+      (do (slot-set 619 v) (slot-set 620 (slot-get 31)) 0))))
+
 (defn set-display [(page : String @ Region) (vs : I32) (ve : I32)] : I32
   (let [a (skip-ws page vs ve)
         b (tok-end page a ve)]
@@ -695,6 +775,7 @@
       ((= (word-eq page a b "list-item") 1) (tset 11 1))
       ((= (word-eq page a b "inline") 1) (tset 11 0))
       ((= (word-eq page a b "inline-block") 1) (tset 11 0))
+      ((= (word-eq page a b "flex") 1) (flex-claim page))
       (true 0))))
 
 (defn rows-m [(px : I32)] : I32
@@ -781,6 +862,9 @@
     ((= (word-eq page ns ne "padding-bottom") 1) (side-set 18 1 (parse-len page vs ve)))
     ((= (word-eq page ns ne "padding-left") 1) (side-set 19 0 (parse-len page vs ve)))
     ((= (word-eq page ns ne "border") 1) (set-border page vs ve))
+    ((= (word-eq page ns ne "flex-direction") 1) (flex-dir page vs ve))
+    ((= (word-eq page ns ne "gap") 1) (set-gap page vs ve))
+    ((= (word-eq page ns ne "column-gap") 1) (set-gap page vs ve))
     ((= (word-eq page ns ne "width") 1) (set-width page vs ve 0))
     ((= (word-eq page ns ne "max-width") 1) (set-width page vs ve 1))
     (true 0)))
@@ -985,21 +1069,26 @@
           p (- d 1)
           bw (tget 8)
           chrome (+ (if (= (tget 22) 1) bw (* bw 2)) (+ (tget 19) (tget 17)))
+          fc (and (> (slot-get 610) 0) (= d (+ (slot-get 610) 1)))
+          fnn (if (> (slot-get 611) 1) (slot-get 611) 1)
+          fg (if (= (slot-get 620) (slot-get 610)) (slot-get 619) 0)
+          fw (/ (- (- (eget p 23) (eget p 6)) (* fg (- fnn 1))) fnn)
+          pl (if fc (+ (eget p 6) (* (slot-get 613) (+ fw fg))) (eget p 6))
+          pr (if fc (+ pl fw) (eget p 23))
           mlr (tget 15)
           mrr (tget 13)
           autol (>= mlr 100000)
           autor (>= mrr 100000)
           ml (if autol 0 mlr)
           mr (if autor 0 mrr)
-          pl (eget p 6)
-          avail (- (- (eget p 23) pl) (+ ml mr))
+          avail (- (- pr pl) (+ ml mr))
           wc (tget 20)
           outer0 (if (>= wc 0) (+ wc chrome) avail)
           outer (if (> outer0 avail) avail (if (< outer0 chrome) chrome outer0))
           free (- avail outer)
           off (if (and autol autor) (/ free 2) (if autol free 0))
           bl (+ pl (+ ml off))
-          right (if (>= wc 0) (+ bl outer) (- (eget p 23) mr))
+          right (if (>= wc 0) (+ bl outer) (- pr mr))
           a (tset 5 bl)
           b (tset 6 (+ bl (+ bw (tget 19))))
           c (tset 7 right)
@@ -1038,6 +1127,20 @@
     (close-top)
     0))
 
+(defn flex-first [] : I32
+  (do (slot-set 612 (slot-get 33)) (slot-set 614 (slot-get 33)) 0))
+
+(defn flex-next [] : I32
+  (do (slot-set 33 (slot-get 612)) (slot-set 27 -1) 0))
+
+(defn flex-enter [] : I32
+  (if (and (> (slot-get 610) 0) (= (slot-get 31) (+ (slot-get 610) 1)))
+    (let [i (slot-get 616)
+          a (if (= i 0) (flex-first) (flex-next))
+          b (slot-set 613 i)]
+      (slot-set 616 (+ i 1)))
+    0))
+
 (defn push-styled [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
   (let [ua (ua-id page ns ne)
         blk (ua-block? ua)
@@ -1048,7 +1151,9 @@
       0
       (let [pu (push-entry h blk)
             st (ua-style ua)
-                cs (if (= (slot-get 24) 1) (author-style page ns ne te h) 0)
+                tg (slot-set 618 te)
+            cs (if (= (slot-get 24) 1) (author-style page ns ne te h) 0)
+            fe (if (= blk 1) (flex-enter) 0)
             gm (finish-geom blk)
             pb (if (= ua 18) (note-page-bg) 0)
             hd (note-hide)
@@ -1083,13 +1188,17 @@
 
 (defn close-block [(hid : Bool)] : I32
   (let [e (if hid 0 (end-line))
+        isc (= (slot-get 31) (slot-get 610))
+        mx (if (and isc (> (slot-get 614) (slot-get 33))) (slot-set 33 (slot-get 614)) 0)
         r1 (if hid 0 (blank-rows (tget 18) (slot-get 31)))
         bb (if (and (not hid) (> (tget 8) 0) (row-vis? (- (slot-get 33) 1)))
              (hline (- (row-y (slot-get 33)) 2))
              0)
         mb (tget 14)
         p (pop-entry)
-        r2 (if hid 0 (blank-rows mb (slot-get 31)))]
+        r2 (if hid 0 (blank-rows mb (slot-get 31)))
+        isk (and (> (slot-get 610) 0) (= (+ (slot-get 31) 1) (+ (slot-get 610) 1)))
+        km (if (and isk (< (slot-get 614) (slot-get 33))) (slot-set 614 (slot-get 33)) 0)]
     (slot-set 32 (tget 6))))
 
 (defn find-open [(h : I32)] : I32
@@ -1202,6 +1311,8 @@
   (do (slot-set 38 ren) (slot-set 34 scroll) (slot-set 35 rows) (slot-set 36 x0) (slot-set 37 y0)
       (slot-set 39 width) (slot-set 31 0) (slot-set 32 0) (slot-set 33 0) (slot-set 27 -1)
       (slot-set 28 0) (slot-set 29 0) (slot-set 30 0) (slot-set 297 -1)
+      (slot-set 610 0) (slot-set 611 0) (slot-set 613 0) (slot-set 614 0) (slot-set 616 0) (slot-set 617 revealed)
+      (slot-set 619 0) (slot-set 620 0)
       (init-root width)
       (if (= (slot-get 24) 1) (scan-styles page start revealed) 0)
       0))

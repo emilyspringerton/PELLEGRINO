@@ -31,3 +31,6 @@ Read the monorepo root `CLAUDE.md` (The Emily Way) first; this file is repo-spec
 - Box model (v1.3): style-stack field 20 = content width px (-1 auto); margin-left/right `auto` is stored as the
   sentinel 100000 and resolved in `finish-geom` (children now wrap at the parent's slot-23 edge, so parent padding/border
   is respected). No `height` (the 24-field stack stride is full).
+- Flexbox (v1.4): scratch slots 610-620 (see the header block in `pellegrino.prn`), single level; children share the
+  start row (`flex-enter`), `fill-start` stops later columns repainting the container chain over earlier ones. VS0: `do`
+  inside an `if` in a `let` binding does not compile (`do(...)` emitted) -- wrap it in a helper fn.

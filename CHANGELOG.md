@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-15 (v1.4 -- flexbox, the cheap kind)
+- `display: flex` lays a container's block children out as equal-width columns side by side (`gap` / `column-gap`
+  honoured; `flex-direction: column` falls back to normal stacking). The child count is scanned ahead in the bytes
+  revealed so far, so the columns re-divide as more children stream in. Height = the tallest column.
+- One flex level at a time (a flex inside a flex child is laid out as a plain block). Children's own `width` is
+  respected inside their column; no wrap/grow/shrink/basis/justify/align.
+- Verified by eye in an Xvfb screenshot only; the Bazel smoke suite was not run on this box.
+
 ## 2026-10-15 (v1.3 -- box model: width, max-width, auto margins)
 - `width` / `max-width` (px, em, % of the parent's content width; content-box, clamped to the parent) and
   `margin-left/right: auto` / `margin: 0 auto` centring. Children now wrap at the parent's content edge
