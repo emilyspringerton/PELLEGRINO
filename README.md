@@ -136,6 +136,13 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   been benchmarked yet and no figure should be quoted until a harness exists.
 - **Safety:** no sandbox, no process isolation. Trusted content only.
 
+## Embedding (v1.11)
+
+The engine can be driven as a library by a host that owns its own window: `embed-open` / `embed-draw` /
+`embed-click` / `embed-key` / `embed-action-start`/`-end` (see CHANGELOG 2026-10-15). SHANKPIT's lobby renders its OS
+menu this way. Status: `scripts/embed_test.sh` passes (headless, SDL dummy driver); the full browser smoke suite was
+not re-run for this change.
+
 ## Run
 
 Download the latest release, unzip, and run `RUN.bat` (Windows) or `./RUN.sh` (Linux). Pass a URL as the first argument, or

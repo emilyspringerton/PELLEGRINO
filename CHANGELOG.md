@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-15 (v1.11 -- embed API)
+- Kanban #627 (SHANKPIT OS menu on basic HTML/CSS + PELLEGRINO rendering). `pellegrino.prn` gains an **embed API**
+  so a host that owns its own window/event loop can use the layout + paint engine as a library: `embed-open w h`
+  (offscreen ARGB8888 software renderer, needs PARENA aa48abf+), `embed-draw ren page n w h clear`, `embed-click`,
+  `embed-wheel`, `embed-key` (Tab/Shift+Tab/Enter/Space), `embed-action-start`/`-end` (the activated link's byte range
+  INTO THE HOST'S OWN PAGE STRING -- embed mode never navigates, so `shankpit:` etc. schemes are the host's) and
+  `embed-ack`. Slots 4000-4002. `tests/embed_test.c` + `scripts/embed_test.sh`: 9 checks (paint, click -> href range,
+  ack, Tab+Enter) under `SDL_VIDEODRIVER=dummy`. The browser path (`pellegrino-run`) is untouched.
+  Not built: Bazel target for the embed test (script only), the full smoke suite was NOT re-run on this change.
+
 ## 2026-10-15 (v1.10 -- UA default styling)
 - Founder real-time: "can we ensure we have some default styling on dom elements? ... in the case where the dev is
   relying on some of the defaults i think those cases are showing weird in places".

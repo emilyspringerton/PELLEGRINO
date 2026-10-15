@@ -21,6 +21,15 @@
 (import bytes)
 (import image/png)
 (export pellegrino-run)
+(export embed-init)
+(export embed-open)
+(export embed-draw)
+(export embed-click)
+(export embed-wheel)
+(export embed-key)
+(export embed-action-start)
+(export embed-action-end)
+(export embed-ack)
 
 ;; 5x8 font, ASCII 32..126, 8 rows x 1 byte each = 16 hex chars per glyph (tools/gen_font.py).
 (defn font-data [] : String
@@ -5034,6 +5043,85 @@
                 p5 (ensure-visible rows)
                 p6 (fm-submit page)]
             (recur (+ frames 1))))))))
+
+;; ---- embed API (v1.11, 2026-10-15): PELLEGRINO as a library inside a host that owns the window ----
+;; SHANKPIT's lobby draws its OS menu (HTML + CSS) through the same layout/paint engine the browser uses.
+;; The host owns the SDL window, renderer, event loop and present; none of that is touched here. It hands
+;; over a page string, mouse/key events, and reads back which link was activated as a (start,end) byte
+;; range INTO ITS OWN page string (no copy, no network: embed mode never navigates). Slot map:
+;;   4000 embed flag   4001/4002 activated href range (-1 = none until the host calls embed-ack)
+(defn embed-init [(w : I32) (h : I32)] : I32
+  (do (slot-set 4000 1)
+      (slot-set 4001 -1)
+      (slot-set 4002 -1)
+      (slot-set 0 0)
+      (slot-set 1 0)
+      (slot-set 2 1)
+      (slot-set 3 0)
+      (slot-set 4 -1)
+      (slot-set 5 -1)
+      (slot-set 6 0)
+      (slot-set 24 1)
+      (slot-set 25 1)
+      (slot-set 296 -1)
+      (slot-set 1641 -1)
+      (slot-set 1640 0)
+      (slot-set 1646 w)
+      (slot-set 1647 h)
+      (slot-set 1634 16)
+      (slot-set 298 -1)
+      (slot-set 26 0)
+      (slot-set 1097 -1)
+      (slot-set 1088 -1)
+      (slot-set 1096 -1)
+      (slot-set 1091 -1)
+      (slot-set 1094 -1)
+      (clear-click)
+      (reset-sel)
+      0))
+
+(defn embed-open [(w : I32) (h : I32)] : I32
+  (do (embed-init w h)
+      (sdl2-raw-create-surface-renderer w h)))
+
+(defn embed-resolve [] : I32
+  (if (>= (slot-get 15) 0)
+    (do (slot-set 4001 (slot-get 15)) (slot-set 4002 (slot-get 16)) (clear-click))
+    (clear-click)))
+
+;; one frame of `page` (n bytes) into the host's renderer at (12,12); never presents. clear=1 clears first.
+(defn embed-draw [(ren : I32) (page : String @ Region) (n : I32) (w : I32) (h : I32) (clear : I32)] : I32
+  (let [s (set-revealed n)
+        cb (if (= clear 1) (clear-color ren) 0)
+        cl (if (= clear 1) (sdl2-raw-render-clear ren) 0)
+        rs (reset-sel)
+        cols (/ (- w 24) 12)
+        rows (/ (- h 24) 18)
+        last (draw-page ren page 0 n (slot-get 1) cols rows 12 12)
+        r (embed-resolve)]
+    last))
+
+(defn embed-click [(x : I32) (y : I32)] : I32
+  (on-click x y))
+
+(defn embed-wheel [(d : I32)] : I32
+  (on-wheel d))
+
+;; Tab / Shift+Tab select a link, Enter / Space activate it; every other key is the host's business
+(defn embed-key [(k : I32)] : I32
+  (cond
+    ((= k 9) (select-link (if (shift-held?) -1 1)))
+    ((or (= k (key-return)) (= k 32)) (activate-link))
+    (true 0)))
+
+(defn embed-action-start [] : I32
+  (slot-get 4001))
+
+(defn embed-action-end [] : I32
+  (slot-get 4002))
+
+(defn embed-ack [] : I32
+  (do (slot-set 4001 -1) (slot-set 4002 -1) 0))
 
 (defn pellegrino-run [(arg : String @ Region)] : I32
   (with-arena [a :region/scratch 65536]
