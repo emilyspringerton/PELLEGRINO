@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-15 (CI fix, kanban #642)
+- Fixed the red build (5 consecutive failing `main` runs since the v1.11 embed API): `MODULE.bazel` still pinned
+  PARENA `86bb47c`, but the embed code calls `sdl2-raw-create-surface-renderer` / `sdl2_create_surface_renderer_impl`,
+  which only exist from PARENA `aa48abf`. At the old pin the generated C had an implicit declaration and failed to
+  link on both the Linux and Windows jobs. Pin bumped to `aa48abf`. Verified locally by regenerating
+  `pellegrino_gen.inc` from the new stdlib and syntax-checking the host against the new runtime (clean), and by
+  reproducing the failure against the old pin's stdlib/runtime. The full Bazel build/test could not be run here
+  (no Bazel on this box) -- CI is the proof. (session: unknown)
+
 ## 2026-10-15 (v1.12 -- dogfooding MIXFORGE, kanban #637)
 - Rendered MIXFORGE's `web/dj.html` and `web/multiplayer.html` (file argument, headless Xvfb screenshots) and fixed what broke:
   - **A `<script>` body no longer leaks onto the page.** Skipped content ended at the first `</` of any kind, so a
