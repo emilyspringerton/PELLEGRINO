@@ -219,6 +219,10 @@ rm -f www/post.log
 run "--smoke-form=http://127.0.0.1:$PORT/form_post.html"
 need "form: POST http://127.0.0.1:$PORT/submit"
 grep -q '^/submit p=xhello+world+%26+co&h=a+b$' www/post.log || { echo "FAIL: POST body wrong"; cat www/post.log; exit 1; }
+echo "== 19c. <select> and <textarea> submit their value (the chosen <option>, the seeded text)"
+printf '<form action="/index.html" method="get"><input name="q" value=""><select name="c"><option value="r">Red</option><option value="g" selected>Green</option></select><textarea name="t">note one</textarea><input type="submit" name="go" value="Go"></form>\n' > www/form_sel.html
+run "--smoke-form=http://127.0.0.1:$PORT/form_sel.html"
+for n in "smoke-form: typing" "navigate http://127.0.0.1:$PORT/index.html?q=hello+world+%26+co&c=g&t=note+one" "clean exit"; do need "$n"; done
 echo "== 19b. entities and curly quotes decode; scroll keys; window move"
 python3 - > www/long.html <<'PY'
 print("<p>Tom &amp; Jerry &lt;3 &#65;&#x42; \u201cq\u201d \u2014 done</p>")

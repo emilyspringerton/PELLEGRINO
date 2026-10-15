@@ -41,3 +41,9 @@ Read the monorepo root `CLAUDE.md` (The Emily Way) first; this file is repo-spec
   `PARENA_SLOTS` is 2048 now. A POST is "encoded body in the line buffer + slot 1095"; `start-nav` clears the flag
   after dispatch so redirects go back to GET. `string/char-at` is a *signed* char -- use `byte-at` for UTF-8.
   Window move needs `sdl2-raw-move-window` (PARENA 575bdf5+).
+- HTML5 gaps (v1.8): style-stack field 21 on an HTML entry = 20 underline / 21 line-through (counted in slots 631/632;
+  `pop-entry` releases). Hidden-element bookkeeping: slots 635-637 (see `hide-end`); `close-block` must not touch the
+  cursor when `hid`. Details toggles: slots 660+2k, depth table 680+d; table columns 650-657; `<select>` is form entry
+  kind 7 (+2 = chosen index; its submitted value is re-read from the page); `<textarea>` is kind 1 seeded at first
+  sight (only once `</textarea>` has arrived). **VS0 trap hit twice:** `(if (< gt 0) A B)` with the arms the wrong way
+  round compiles fine -- check the polarity of every `-1`-means-missing guard.

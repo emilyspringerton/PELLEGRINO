@@ -404,9 +404,26 @@
 (defn gap-reset [] : I32
   (do (slot-set 620 0) (slot-set 619 0) 0))
 
+;; a hidden element ending hands "the line before it was blank" to the newline that follows it (v1.8)
+(defn hide-end [] : I32
+  (do (slot-set 635 (slot-get 637)) (slot-set 29 0)))
+
+;; text decoration (v1.8): an entry marks itself in field 21 (20 underline, 21 line-through) and bumps slot 631/632
+(defn deco-mark [(kind : I32)] : I32
+  (if (= (tget 21) 0)
+    (do (tset 21 kind) (slot-set (+ 611 kind) (+ (slot-get (+ 611 kind)) 1)) 0)
+    0))
+
+(defn deco-release [(sp : I32)] : I32
+  (let [k (eget sp 21)]
+    (if (or (= k 20) (= k 21))
+      (slot-set (+ 611 k) (- (slot-get (+ 611 k)) 1))
+      0)))
+
 (defn pop-entry [] : I32
   (let [sp (slot-get 31)
-        a (if (= (slot-get 29) sp) (slot-set 29 0) 0)
+        dr (deco-release sp)
+        a (if (= (slot-get 29) sp) (hide-end) 0)
         f (if (= (slot-get 610) sp) (flex-reset) 0)
         g (if (= (slot-get 620) sp) (gap-reset) 0)]
     (if (> sp 0) (slot-set 31 (- sp 1)) 0)))
@@ -526,11 +543,15 @@
       0)))
 
 (defn do-newline [] : I32
-  (if (hidden?)
-    (md-pop-line)
-    (let [a (ensure-fill (slot-get 33))
-          b (next-line)]
-      (md-pop-line))))
+  (cond
+    ((hidden?) (md-pop-line))
+    ((and (= (slot-get 635) 1) (<= (slot-get 32) (tget 6)))
+     (do (slot-set 635 0) (md-pop-line)))
+    (true (let [a (ensure-fill (slot-get 33))
+                s (slot-set 635 0)
+                t (slot-set 636 1)
+                b (next-line)]
+            (md-pop-line)))))
 
 ;; ---- drawing one character cell ----
 (defn link-hit [(px : I32) (py : I32) (cw : I32) (ch : I32) (hs : I32) (he : I32)] : I32
@@ -572,13 +593,18 @@
         g1 (draw-glyph ren c px py s)
         g2 (if (= (tget 4) 1) (draw-glyph ren c (+ px 1) py s) 0)
         u (if (>= hs 0) (sdl2-raw-render-fill-rect ren px (+ py (- ch 1)) cw 1) 0)
-        h (if (>= hs 0) (link-hit px py cw ch hs he) 0)]
+        h (if (>= hs 0) (link-hit px py cw ch hs he) 0)
+        d1 (if (> (slot-get 631) 0) (sdl2-raw-render-fill-rect ren px (+ py (- ch 2)) cw 1) 0)
+        d2 (if (> (slot-get 632) 0) (sdl2-raw-render-fill-rect ren px (+ py (/ ch 2)) cw 1) 0)]
     0))
 
 (defn wrap-if [(cw : I32)] : I32
   (if (and (> (+ (slot-get 32) cw) (tget 23)) (> (slot-get 32) (tget 6)))
     (next-line)
     0))
+
+(defn do-clear-nl [] : I32
+  (do (slot-set 635 0) (slot-set 636 0) 0))
 
 (defn put-char [(c : I32) (i : I32) (revealed : I32) (hs : I32) (he : I32) (ord : I32)] : I32
   (if (hidden?)
@@ -588,7 +614,8 @@
           w (wrap-if cw)
           r (slot-get 33)
           col (slot-get 32)
-          v (if (row-vis? r) (draw-vis c i revealed hs he ord s cw r col) 0)]
+          v (if (row-vis? r) (draw-vis c i revealed hs he ord s cw r col) 0)
+          cl (if (> c 32) (do-clear-nl) 0)]
       (slot-set 32 (+ col cw)))))
 
 ;; ---- opening and closing elements ----
@@ -601,7 +628,7 @@
         k))
     s))
 
-;; UA element ids: 1-6 h1-h6, 7 p, 8 generic block, 9 li, 10 bold, 11 code, 12 em, 13 small, 14 big,
+;; UA element ids (24 underline u/ins): 1-6 h1-h6, 7 p, 8 generic block, 9 li, 10 bold, 11 code, 12 em, 13 small, 14 big,
 ;; 15 mark, 16 pre, 17 blockquote, 18 body/html, 19 font, 20 ul/ol, 21 hidden (template/svg/...), 23 dim (del/s), 0 plain inline
 (defn ua-id [(page : String @ Region) (a : I32) (b : I32)] : I32
   (cond
@@ -686,6 +713,13 @@
     ((= (word-eq page a b "sub") 1) 13)
     ((= (word-eq page a b "sup") 1) 13)
     ((= (word-eq page a b "th") 1) 10)
+    ((= (word-eq page a b "u") 1) 24)
+    ((= (word-eq page a b "ins") 1) 24)
+    ((= (word-eq page a b "textarea") 1) 21)
+    ((= (word-eq page a b "select") 1) 21)
+    ((= (word-eq page a b "progress") 1) 21)
+    ((= (word-eq page a b "meter") 1) 21)
+    ((= (word-eq page a b "head") 1) 21)
     (true 0)))
 
 (defn ua-block? [(ua : I32)] : I32
@@ -771,7 +805,8 @@
     ((= ua 17) (ua-quote))
     ((= ua 20) (tset 15 12))
     ((= ua 21) (tset 10 1))
-    ((= ua 23) (tset 1 8421504))
+    ((= ua 23) (do (tset 1 8421504) (deco-mark 21)))
+    ((= ua 24) (deco-mark 20))
     (true 0)))
 
 ;; ---- author CSS ----
@@ -898,6 +933,13 @@
         (tset 9 (if (>= c 0) c 8421504))
         0)))
 
+;; text-decoration: underline | line-through (none leaves what the element inherited)
+(defn set-deco [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (cond
+    ((= (has-tok page vs ve "underline") 1) (deco-mark 20))
+    ((= (has-tok page vs ve "line-through") 1) (deco-mark 21))
+    (true 0)))
+
 (defn apply-prop [(page : String @ Region) (ns : I32) (ne : I32) (vs : I32) (ve : I32)] : I32
   (cond
     ((= (word-eq page ns ne "color") 1) (set-fg (parse-color page vs ve)))
@@ -917,6 +959,7 @@
     ((= (word-eq page ns ne "padding-bottom") 1) (side-set 18 1 (parse-len page vs ve)))
     ((= (word-eq page ns ne "padding-left") 1) (side-set 19 0 (parse-len page vs ve)))
     ((= (word-eq page ns ne "border") 1) (set-border page vs ve))
+    ((= (word-eq page ns ne "text-decoration") 1) (set-deco page vs ve))
     ((= (word-eq page ns ne "flex-direction") 1) (flex-dir page vs ve))
     ((= (word-eq page ns ne "gap") 1) (set-gap page vs ve))
     ((= (word-eq page ns ne "column-gap") 1) (set-gap page vs ve))
@@ -1151,9 +1194,12 @@
       0)
     0))
 
+(defn hide-start [] : I32
+  (do (slot-set 637 (slot-get 636)) (slot-set 29 (slot-get 31))))
+
 (defn note-hide [] : I32
   (if (and (= (tget 10) 1) (= (slot-get 29) 0))
-    (slot-set 29 (slot-get 31))
+    (hide-start)
     0))
 
 (defn bullet [] : I32
@@ -1205,7 +1251,8 @@
   (let [ua (ua-id page ns ne)
         blk (ua-block? ua)
         h (hash-range page ns ne)
-        pre (if (= blk 1) (end-line) 0)
+        hc (head-close page ns ne)
+        pre (if (= blk 1) (pre-break ua) 0)
         ic (implied-close ua h)]
     (if (>= (slot-get 31) 11)
       0
@@ -1648,7 +1695,355 @@
   (if (> (slot-get 32) (tget 6)) (put-char 32 0 1000 -1 -1 -1) 0))
 
 (defn cell-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
-  (do (cell-gap) (push-styled page ns ne te)))
+  (do (cell-place page ns ne) (push-styled page ns ne te)))
+
+;; ---- v1.8: <q>, <details>/<summary> toggle, table columns, <select> <textarea> <progress> <meter> ----
+;; Slots: 633 stack index of a collapsed <details> (0 none), 634 summary un-hid it, 635/636/637 newline-after-hidden
+;; bookkeeping, 631/632 underline / line-through depth, 638 toggle count, 640 cell index in the row, 641 row has <th>,
+;; 642-644 open <summary> (col, row, details tag index*2 + shown), 645 table width px, 650-657 column x offsets,
+;; 660+2k details tag index / 661+2k flipped (k < 16), 680+d details tag index*2 + shown at stack depth d.
+(defn q-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (do (push-styled page ns ne te) (put-lit 34 0 0)))
+
+(defn q-close [(page : String @ Region) (ns : I32) (ne : I32)] : I32
+  (if (> (find-open (hash-range page ns ne)) 0)
+    (do (put-lit 34 0 0) (close-generic page ns ne))
+    0))
+
+;; 1 if the bare attribute `lit` (open, selected, ...) is in the tag page[ne,te)
+(defn bool-attr? [(page : String @ Region) (ne : I32) (te : I32) (lit : String @ Region)] : I32
+  (let [n (string/length lit)]
+    (loop [i ne]
+      (if (> (+ i n) te)
+        0
+        (if (and (ws? (string/char-at page (- i 1)))
+                 (and (= (match-at page i lit) 1) (not (letter? (string/char-at page (+ i n))))))
+          1
+          (recur (+ i 1)))))))
+
+(defn tg-find [(pos : I32)] : I32
+  (loop [k 0]
+    (if (>= k (slot-get 638))
+      -1
+      (if (= (slot-get (+ 660 (* k 2))) pos) k (recur (+ k 1))))))
+
+(defn tg-add [(pos : I32)] : I32
+  (let [n (slot-get 638)]
+    (if (>= n 16)
+      0
+      (let [a (slot-set (+ 660 (* n 2)) pos)
+            b (slot-set (+ 661 (* n 2)) 1)]
+        (slot-set 638 (+ n 1))))))
+
+(defn tg-flip [(pos : I32)] : I32
+  (let [k (tg-find pos)]
+    (if (>= k 0)
+      (slot-set (+ 661 (* k 2)) (- 1 (slot-get (+ 661 (* k 2)))))
+      (tg-add pos))))
+
+(defn tg-state [(pos : I32)] : I32
+  (let [k (tg-find pos)]
+    (if (>= k 0) (slot-get (+ 661 (* k 2))) 0)))
+
+(defn details-hide [] : I32
+  (do (tset 10 1) (slot-set 633 (slot-get 31)) (note-hide)))
+
+(defn details-note [(pos : I32) (shown : I32)] : I32
+  (slot-set (+ 680 (slot-get 31)) (+ (* pos 2) shown)))
+
+(defn details-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [pos (slot-get 621)
+        op (bool-attr? page ne te "open")
+        st (tg-state pos)
+        shown (if (= st 1) (- 1 op) op)
+        pu (push-styled page ns ne te)
+        nt (details-note pos shown)]
+    (if (or (= shown 1) (hidden?)) 0 (details-hide))))
+
+(defn summary-unhide [] : I32
+  (do (slot-set 29 0) (slot-set 634 1) 0))
+
+(defn sum-mark [(dv : I32)] : I32
+  (do (slot-set 642 (slot-get 32)) (slot-set 643 (slot-get 33)) (slot-set 644 dv)
+      (put-lit (if (= (mod dv 2) 1) 118 62) 32 0)))
+
+(defn summary-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [d (slot-get 31)
+        dv (slot-get (+ 680 d))
+        isd (if (and (> d 0) (= (tget 0) (hash-range "details" 0 7))) 1 0)
+        uh (if (and (= isd 1) (and (hidden?) (and (= (slot-get 29) d) (= (slot-get 633) d)))) (summary-unhide) 0)
+        pu (push-styled page ns ne te)]
+    (if (and (= isd 1) (not (hidden?))) (sum-mark dv) 0)))
+
+(defn sum-hit [(dv : I32)] : I32
+  (let [r (slot-get 643)
+        px (+ (slot-get 36) (slot-get 642))
+        x1 (+ (slot-get 36) (slot-get 32))
+        py (row-y r)]
+    (if (and (>= dv 0) (and (= r (slot-get 33)) (row-vis? r)
+                           (and (>= (slot-get 13) px) (< (slot-get 13) x1)
+                                (and (>= (slot-get 14) py) (< (slot-get 14) (+ py 18))))))
+      (do (tg-flip (/ dv 2)) (fm-eat) (slot-set 2 1) 0)
+      0)))
+
+(defn summary-rehide [] : I32
+  (do (if (and (= (slot-get 633) (slot-get 31)) (= (slot-get 29) 0)) (slot-set 29 (slot-get 633)) 0)
+      (slot-set 634 0)
+      0))
+
+(defn summary-close [(page : String @ Region) (ns : I32) (ne : I32)] : I32
+  (let [dv (slot-get 644)
+        h (if (>= dv 0) (sum-hit dv) 0)
+        z (slot-set 644 -1)
+        c (close-generic page ns ne)]
+    (if (= (slot-get 634) 1) (summary-rehide) 0)))
+
+;; table columns: widths are measured from the source between <table> and </table>, then every cell starts at
+;; its column's x offset (a header row gets a rule under it)
+(defn tb-store [(col : I32) (n : I32) (pend : I32)] : I32
+  (if (and (= pend 1) (and (< col 8) (> n (slot-get (+ 650 col)))))
+    (slot-set (+ 650 col) n)
+    0))
+
+(defn tb-reset [] : I32
+  (loop [k 0]
+    (if (>= k 8)
+      0
+      (let [x (slot-set (+ 650 k) 0)] (recur (+ k 1))))))
+
+(defn tb-offsets [] : I32
+  (loop [k 0 acc 0]
+    (if (>= k 8)
+      (slot-set 645 acc)
+      (let [w (slot-get (+ 650 k))
+            x (slot-set (+ 650 k) acc)]
+        (recur (+ k 1) (+ acc (if (> w 0) (* (+ w 2) (* 6 (tget 3))) 0)))))))
+
+(defn tb-scan [(page : String @ Region) (from : I32) (lim : I32)] : I32
+  (loop [k from col 0 n 0 pend 0]
+    (if (>= k lim)
+      0
+      (let [c (string/char-at page k)]
+        (if (= c 60)
+          (let [gt (find-in page 62 k lim)]
+            (if (< gt 0)
+              0
+              (let [cl (if (= (string/char-at page (+ k 1)) 47) 1 0)
+                    ns (+ k (+ 1 cl))
+                    ne (name-end page ns gt)
+                    istd (if (or (= (word-eq page ns ne "td") 1) (= (word-eq page ns ne "th") 1)) 1 0)
+                    istr (word-eq page ns ne "tr")
+                    istb (word-eq page ns ne "table")
+                    st (if (or (= istd 1) (or (= istr 1) (= istb 1))) (tb-store col n pend) 0)]
+                (cond
+                  ((and (= cl 1) (= istb 1)) 0)
+                  ((and (= istd 1) (= cl 0)) (recur (+ gt 1) (+ col pend) 0 1))
+                  ((= istd 1) (recur (+ gt 1) (+ col pend) 0 0))
+                  ((= istr 1) (recur (+ gt 1) 0 0 0))
+                  (true (recur (+ gt 1) col n pend))))))
+          (cond
+            ((or (= c 10) (or (= c 13) (= c 9))) (recur (+ k 1) col n pend))
+            ((= c 38)
+             (let [sm (find-in page 59 k (if (< (+ k 9) lim) (+ k 9) lim))]
+               (recur (if (< sm 0) (+ k 1) (+ sm 1)) col (+ n pend) pend)))
+            (true (recur (+ k 1) col (+ n pend) pend))))))))
+
+(defn table-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [r (tb-reset)
+        sc (tb-scan page (+ te 1) (slot-get 617))
+        of (tb-offsets)]
+    (push-styled page ns ne te)))
+
+(defn tr-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (do (slot-set 640 0) (slot-set 641 0) (push-styled page ns ne te)))
+
+(defn cell-place [(page : String @ Region) (ns : I32) (ne : I32)] : I32
+  (let [idx (slot-get 640)
+        x (if (< idx 8) (+ (tget 6) (slot-get (+ 650 idx))) 0)
+        th (if (= (word-eq page ns ne "th") 1) (slot-set 641 1) 0)
+        nx (slot-set 640 (+ idx 1))]
+    (cond
+      ((hidden?) 0)
+      ((and (< idx 8) (and (> idx 0) (< (slot-get 32) x))) (slot-set 32 x))
+      (true (cell-gap)))))
+
+(defn tr-close [(page : String @ Region) (ns : I32) (ne : I32)] : I32
+  (let [hasth (slot-get 641)
+        c (close-generic page ns ne)
+        r (slot-get 33)
+        l (if (and (= hasth 1) (and (not (hidden?)) (row-vis? (- r 1))))
+            (fill-rect-col (slot-get 38) 6316128 (+ (slot-get 36) (tget 6)) (- (row-y r) 2) (slot-get 645) 1)
+            0)]
+    (slot-set 641 0)))
+
+;; <select>: a "[ label v ]" box showing the chosen <option>; a click steps to the next one (entry +2 = index)
+(defn sel-lim [(page : String @ Region) (pos : I32) (n : I32)] : I32
+  (loop [i pos]
+    (if (>= (+ i 8) n)
+      n
+      (if (= (match-at page i "</select") 1) i (recur (+ i 1))))))
+
+;; start of the idx-th <option (or -1); idx < 0 counts them (returns the count)
+(defn opt-nth [(page : String @ Region) (from : I32) (lim : I32) (idx : I32)] : I32
+  (loop [i from c 0]
+    (if (>= (+ i 7) lim)
+      (if (< idx 0) c -1)
+      (if (= (match-at page i "<option") 1)
+        (if (= c idx) i (recur (+ i 7) (+ c 1)))
+        (recur (+ i 1) c)))))
+
+(defn opt-selected [(page : String @ Region) (from : I32) (lim : I32)] : I32
+  (loop [i from c 0]
+    (if (>= (+ i 7) lim)
+      0
+      (if (= (match-at page i "<option") 1)
+        (let [gt (find-in page 62 i lim)]
+          (if (and (>= gt 0) (= (bool-attr? page (+ i 7) gt "selected") 1))
+            c
+            (recur (+ i 7) (+ c 1))))
+        (recur (+ i 1) c)))))
+
+(defn opt-label-end [(page : String @ Region) (ls : I32) (lim : I32)] : I32
+  (loop [i ls]
+    (if (or (>= i lim) (or (= (string/char-at page i) 60) (or (= (string/char-at page i) 10) (>= (- i ls) 24))))
+      i
+      (recur (+ i 1)))))
+
+(defn fm-cycle [(k : I32) (cnt : I32)] : I32
+  (do (fm-set k 2 (mod (+ (fm-get k 2) 1) cnt)) (fm-eat) (slot-set 2 1) 0))
+
+(defn sel-arrow [(col : I32) (w : I32) (r : I32) (sc : I32)] : I32
+  (do (fm-ink 0) (sel-arrow-glyph col w r sc)))
+
+(defn sel-arrow-glyph [(col : I32) (w : I32) (r : I32) (sc : I32)] : I32
+  (draw-glyph (slot-get 38) 118 (+ (slot-get 36) (- (+ col w) (* 2 (* 6 sc)))) (row-y r) sc))
+
+(defn sel-box [(k : I32) (page : String @ Region) (o : I32) (lim : I32) (cnt : I32)] : I32
+  (let [gt (if (< o 0) -1 (find-in page 62 o lim))
+        ls (if (>= gt 0) (+ gt 1) 0)
+        le2 (if (>= gt 0) (opt-label-end page ls lim) 0)
+        sc (tget 3)
+        cw (* 6 sc)
+        n (if (> le2 ls) (- le2 ls) 0)
+        w (* (+ n 4) cw)
+        wr (wrap-if w)
+        r (slot-get 33)
+        col (slot-get 32)
+        vis (row-vis? r)
+        a (if vis (fm-rect col w 6710886 3029574) 0)
+        b (if (and vis (> n 0)) (fm-label page ls le2 (+ (slot-get 36) col) (row-y r) sc) 0)
+        d (if vis (sel-arrow col w r sc) 0)
+        h (if (and vis (and (> cnt 1) (fm-hit? col w))) (fm-cycle k cnt) 0)]
+    (slot-set 32 (+ col (+ w cw)))))
+
+(defn sel-draw [(page : String @ Region) (ne : I32) (te : I32)] : I32
+  (let [pos (slot-get 621)
+        k (fm-entry pos)]
+    (if (< k 0)
+      0
+      (let [lim (sel-lim page te (slot-get 617))
+            ok (if (< lim (slot-get 617)) 1 0)]
+        (if (= ok 1) (sel-live k page ne te lim) 0)))))
+
+(defn sel-live [(k : I32) (page : String @ Region) (ne : I32) (te : I32) (lim : I32)] : I32
+  (let [ini (if (< (fm-get k 1) 0) (fm-set k 2 (opt-selected page te lim)) 0)
+            nh (fm-name-hash page ne te)
+            sy (fm-sync k 7 nh page ne te)
+            cnt (opt-nth page te lim -1)
+            i0 (fm-get k 2)
+            idx (if (>= i0 cnt) 0 i0)
+            o (opt-nth page te lim idx)]
+    (sel-box k page o lim cnt)))
+
+(defn select-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [d (if (hidden?) 0 (sel-draw page ne te))
+        cl (do-clear-nl)]
+    (push-styled page ns ne te)))
+
+;; <textarea>: an editable one-line field seeded from its content (newlines dropped)
+(defn area-end [(page : String @ Region) (from : I32) (n : I32)] : I32
+  (loop [i from]
+    (if (>= (+ i 10) n)
+      -1
+      (if (= (match-at page i "</textarea") 1) i (recur (+ i 1))))))
+
+(defn area-draw [(page : String @ Region) (ne : I32) (te : I32)] : I32
+  (let [e (area-end page (+ te 1) (slot-get 617))
+        k (if (< e 0) -1 (fm-entry (slot-get 621)))]
+    (if (< k 0)
+      0
+      (let [ld (if (< (fm-get k 1) 0) (fm-copy k page (+ te 1) e) 0)
+            nh (fm-name-hash page ne te)
+            sy (fm-sync k 1 nh page ne te)
+            cols (attr-int page ne te "cols=")
+            size (cond ((< cols 4) 30) ((> cols 40) 40) (true cols))]
+        (fm-field k size 0)))))
+
+(defn area-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [d (if (hidden?) 0 (area-draw page ne te))
+        cl (do-clear-nl)]
+    (push-styled page ns ne te)))
+
+;; <progress> / <meter>: "[####------]"; no value on <progress> = "[~~~~~~~~~~]"
+(defn num100 [(page : String @ Region) (ne : I32) (te : I32) (lit : String @ Region) (dflt : I32)] : I32
+  (let [s (attr-start page ne te lit)
+        e (if (< s 0) -1 (href-end page s te))]
+    (if (< e 0)
+      dflt
+      (let [ip (scan-int page s e)
+            p (slot-get 601)
+            hasf (and (< p e) (= (string/char-at page p) 46))
+            f1 (if hasf (frac-digit page (+ p 1) e) 0)
+            f2 (if hasf (frac-digit page (+ p 2) e) 0)]
+        (+ (* ip 100) (+ (* f1 10) f2))))))
+
+(defn bar-cells [(filled : I32) (ch : I32)] : I32
+  (loop [k 0]
+    (if (>= k 10)
+      0
+      (let [p (put-char (if (< k filled) ch 45) 0 1000 -1 -1 -1)] (recur (+ k 1))))))
+
+(defn bar-draw [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [ism (word-eq page ns ne "meter")
+        mx (num100 page ne te "max=" 100)
+        mn (if (= ism 1) (num100 page ne te "min=" 0) 0)
+        v (num100 page ne te "value=" 0)
+        none (if (and (= ism 0) (< (attr-start page ne te "value=") 0)) 1 0)
+        span (- mx mn)
+        f0 (if (<= span 0) 0 (/ (* (- v mn) 10) span))
+        f (cond ((< f0 0) 0) ((> f0 10) 10) (true f0))
+        a (put-char 91 0 1000 -1 -1 -1)
+        b (if (= none 1) (bar-cells 10 126) (bar-cells f 35))
+        c (put-char 93 0 1000 -1 -1 -1)]
+    (put-char 32 0 1000 -1 -1 -1)))
+
+(defn bar-open [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [d (if (hidden?) 0 (bar-draw page ns ne te))
+        cl (do-clear-nl)]
+    (push-styled page ns ne te)))
+
+;; a <head> that was never closed ends at the first element that cannot live in one
+(defn head-child? [(page : String @ Region) (ns : I32) (ne : I32)] : I32
+  (cond
+    ((= (word-eq page ns ne "title") 1) 1)
+    ((= (word-eq page ns ne "meta") 1) 1)
+    ((= (word-eq page ns ne "link") 1) 1)
+    ((= (word-eq page ns ne "script") 1) 1)
+    ((= (word-eq page ns ne "style") 1) 1)
+    ((= (word-eq page ns ne "base") 1) 1)
+    ((= (word-eq page ns ne "noscript") 1) 1)
+    ((= (word-eq page ns ne "template") 1) 1)
+    (true 0)))
+
+(defn head-close [(page : String @ Region) (ns : I32) (ne : I32)] : I32
+  (let [d (find-open (hash-range "head" 0 4))]
+    (if (and (> d 0) (= (head-child? page ns ne) 0)) (close-to d) 0)))
+
+;; a heading or paragraph that starts right after bare inline text on the line gets the gap CSS margins give it
+(defn pre-break [(ua : I32)] : I32
+  (let [dirty (and (>= ua 1) (and (<= ua 7) (and (not (hidden?)) (> (slot-get 32) (tget 6)))))
+        e (end-line)]
+    (if dirty (blank-rows 1 (slot-get 31)) 0)))
 
 (defn open-named [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
   (cond
@@ -1665,6 +2060,15 @@
     ((= (void-tag? page ns ne) 1) 0)
     ((= (string/char-at page (- te 1)) 47) 0)
     ((or (= (word-eq page ns ne "td") 1) (= (word-eq page ns ne "th") 1)) (cell-open page ns ne te))
+    ((= (word-eq page ns ne "q") 1) (q-open page ns ne te))
+    ((= (word-eq page ns ne "details") 1) (details-open page ns ne te))
+    ((= (word-eq page ns ne "summary") 1) (summary-open page ns ne te))
+    ((= (word-eq page ns ne "table") 1) (table-open page ns ne te))
+    ((= (word-eq page ns ne "tr") 1) (tr-open page ns ne te))
+    ((= (word-eq page ns ne "select") 1) (select-open page ns ne te))
+    ((= (word-eq page ns ne "textarea") 1) (area-open page ns ne te))
+    ((= (word-eq page ns ne "progress") 1) (bar-open page ns ne te))
+    ((= (word-eq page ns ne "meter") 1) (bar-open page ns ne te))
     (true (push-styled page ns ne te))))
 
 ;; <name ...> at i: apply it (only once its closing '>' has arrived)
@@ -1695,7 +2099,7 @@
         r2 (if hid 0 (blank-rows mb (slot-get 31)))
         isk (and (> (slot-get 610) 0) (= (+ (slot-get 31) 1) (+ (slot-get 610) 1)))
         km (if (and isk (< (slot-get 614) (slot-get 33))) (slot-set 614 (slot-get 33)) 0)]
-    (slot-set 32 (tget 6))))
+    (if hid 0 (slot-set 32 (tget 6)))))
 
 (defn find-open [(h : I32)] : I32
   (loop [d (slot-get 31)]
@@ -1724,6 +2128,9 @@
       ((= (word-eq page ns ne "button") 1) (fm-button-close))
       ((= (word-eq page ns ne "form") 1)
        (form-close page ns ne))
+      ((= (word-eq page ns ne "q") 1) (q-close page ns ne))
+      ((= (word-eq page ns ne "summary") 1) (summary-close page ns ne))
+      ((= (word-eq page ns ne "tr") 1) (tr-close page ns ne))
       (true (close-generic page ns ne)))))
 
 ;; ---- markdown (rendered through the same style stack as HTML) ----
@@ -1818,6 +2225,8 @@
       (slot-set 28 0) (slot-set 29 0) (slot-set 30 0) (slot-set 297 -1) (slot-set 1086 0)
       (slot-set 610 0) (slot-set 611 0) (slot-set 613 0) (slot-set 614 0) (slot-set 616 0) (slot-set 617 revealed)
       (slot-set 619 0) (slot-set 620 0) (slot-set 1091 -1) (slot-set 1094 -1)
+      (slot-set 631 0) (slot-set 632 0) (slot-set 633 0) (slot-set 634 0) (slot-set 635 0)
+      (slot-set 640 0) (slot-set 641 0)
       (init-root width)
       (if (= (slot-get 24) 1) (scan-styles page start revealed) 0)
       0))
@@ -2292,6 +2701,7 @@
     (slot-set 10 (+ (slot-get 10) 1))
     (slot-set 1088 -1)
     (slot-set 1089 0)
+    (slot-set 638 0)
     (slot-set 1096 -1)
     (pg-log (string/concat "navigate " url dest))
     (nav-then url (nav-dispatch url dest))))
@@ -2954,21 +3364,36 @@
       0
       (let [x (fm-enc-ch (fm-ch j i) dest)] (recur (+ i 1))))))
 
-(defn fm-enc-value [(p : String @ Region) (j : I32) (kind : I32) (ne : I32) (te : I32) (dest : Arena @ Region)] : I32
+(defn fm-enc-sel [(p : String @ Region) (j : I32) (n : I32) (te : I32) (dest : Arena @ Region)] : I32
+  (let [lim (sel-lim p te n)
+        cnt (opt-nth p te lim -1)
+        i0 (fm-get j 2)
+        o (opt-nth p te lim (if (>= i0 cnt) 0 i0))
+        gt (if (< o 0) -1 (find-in p 62 o lim))
+        vs (if (>= gt 0) (attr-start p (+ o 7) gt "value=") -1)
+        ve (if (< vs 0) -1 (href-end p vs gt))]
+    (cond
+      ((< gt 0) 0)
+      ((>= ve 0) (fm-enc-page p vs ve dest))
+      (true (fm-enc-page p (+ gt 1) (opt-label-end p (+ gt 1) lim) dest)))))
+
+(defn fm-enc-value [(p : String @ Region) (j : I32) (kind : I32) (n : I32) (ne : I32) (te : I32) (dest : Arena @ Region)] : I32
   (if (or (= kind 1) (= kind 2))
     (fm-enc-store j dest)
+    (if (= kind 7)
+      (fm-enc-sel p j n te dest)
     (let [vs (attr-start p ne te "value=")
           ve (if (< vs 0) -1 (href-end p vs te))]
       (if (< ve 0)
         (if (or (= kind 4) (= kind 5)) (lb-add "on") 0)
-        (fm-enc-page p vs ve dest)))))
+        (fm-enc-page p vs ve dest))))))
 
-(defn fm-append-pair [(p : String @ Region) (j : I32) (kind : I32) (ns : I32) (nee : I32) (ne : I32) (te : I32)
+(defn fm-append-pair [(p : String @ Region) (j : I32) (kind : I32) (n : I32) (ns : I32) (nee : I32) (ne : I32) (te : I32)
                       (dest : Arena @ Region)] : I32
   (let [sp (if (> (linebuf-len) 0) (lb-add "&") 0)
         a (fm-enc-page p ns nee dest)
         b (lb-add "=")]
-    (fm-enc-value p j kind ne te dest)))
+    (fm-enc-value p j kind n ne te dest)))
 
 (defn fm-include [(j : I32) (trig : I32) (kind : I32) (nee : I32)] : I32
   (cond
@@ -2985,7 +3410,7 @@
         nee (if (< ns 0) -1 (href-end p ns te))
         kind (fm-get j 4)]
     (if (= (fm-include j trig kind nee) 1)
-      (fm-append-pair p j kind ns nee ne te dest)
+      (fm-append-pair p j kind n ns nee ne te dest)
       0)))
 
 (defn fm-collect [(p : String @ Region) (n : I32) (fpos : I32) (trig : I32) (dest : Arena @ Region)] : I32

@@ -90,15 +90,24 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   `<html>`'s background, else `<body>`'s. Verified live over plain HTTP under Xvfb; the HTTPS form path is the same
   code but untested here.
 
-- **HTML5 element coverage (v1.7):** every HTML5 element is recognised and none leaks its tag or leaves the layout
-  unbalanced. Blocks: `p div section article header footer nav main aside address figure figcaption fieldset legend
-  details summary hgroup menu search dialog table thead tbody tfoot tr caption dl dt dd ...`; `<br>`/`<wbr>`/`<hr>` and
-  all void elements (`area source track param embed col ...`) and `<x/>` self-closers; `<th>`/`<td>` are inline cells
-  (a space between them; **no table grid**); `sub/sup` draw small, `del/s/strike` dim, `cite/dfn/var` emphasis,
-  `samp/kbd/code` code, `mark` highlighted; `template svg math iframe object embed map datalist noembed` are hidden
-  (hidden blocks can still leave a stray blank row); `video/audio/canvas/noscript` show their fallback text.
-  Not drawn: `u`/`ins`/`s` underline/strike lines, `<q>` quote marks, `<details>` toggling (always open), real tables,
-  `<textarea>`/`<select>`/`<progress>`/`<meter>` widgets.
+- **HTML5 element coverage (v1.7, gaps closed in v1.8):** every HTML5 element is recognised and none leaks its tag or
+  leaves the layout unbalanced. Blocks: `p div section article header footer nav main aside address figure
+  figcaption fieldset legend hgroup menu search dialog table thead tbody tfoot tr caption dl dt dd ...`;
+  `<br>`/`<wbr>`/`<hr>` and all void elements (`area source track param embed col ...`) and `<x/>` self-closers;
+  `sub/sup` draw small, `cite/dfn/var` emphasis, `samp/kbd/code` code, `mark` highlighted, `th` bold;
+  `u`/`ins` and CSS `text-decoration: underline` draw an underline, `del/s/strike` and `line-through` a strike line
+  (plus the dim colour); `<q>` gets quote marks; `template svg math iframe object embed map datalist noembed head`
+  are hidden (a hidden element no longer leaves stray blank rows or resets the cursor); `video/audio/canvas/noscript`
+  show their fallback text (there is no scripting, so `<noscript>` content is correct to show).
+  - `<details>` is collapsed unless `open`; click its `> summary` to toggle (state kept per page, 16 per page).
+  - Tables: columns are measured from the source and cells line up (8 columns, 1 text row per cell, unscaled text);
+    a row with `<th>` gets a rule under it. No borders, `colspan`/`rowspan`, or wrapping inside cells.
+  - `<select>` shows `[ label v ]`, a click steps to the next `<option>`, and the chosen `value` is submitted;
+    `<textarea>` is an editable one-line field seeded from its content (newlines dropped, 32 bytes); `<progress>` and
+    `<meter>` draw `[####------]`. All of these count toward the 24 controls per page.
+  - A `<p>`/heading directly after bare inline text now gets a blank row above it.
+  Still not built: multi-line `<textarea>`, a `<select>` popup/`multiple`, `<input type=range|color|date|file>`,
+  `<q>` nesting quote styles, `<ruby>`, `<dialog>` modality.
 
 **Not built yet** (see [NORTHSTAR.md](NORTHSTAR.md))
 - HTTP/1.0 only (no chunked/keep-alive/compression), HTTP/2, HTTP/3/QUIC (mbedTLS has no QUIC hooks, so

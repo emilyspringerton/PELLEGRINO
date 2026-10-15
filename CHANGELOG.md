@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-15 (v1.8 -- HTML5 gaps closed)
+- `u`/`ins`/`del`/`s`/`strike` and CSS `text-decoration: underline|line-through` draw real lines; `<q>` quote marks;
+  `<details>` collapses (unless `open`) and toggles on a click of its `<summary>`; tables align their columns and rule
+  off header rows; `<select>` (click cycles, value submitted), `<textarea>` (one-line editable), `<progress>`,
+  `<meter>`; `<head>` hidden (and implicitly closed by the first non-head element); a block after bare inline text
+  gets its top gap.
+- Fixed: a hidden block (`template`, `svg`, ...) reset the line cursor to column 0 on close, so the next visible text
+  drew over the previous line; a newline after a hidden element no longer adds an extra blank row.
+- Tests: smoke section 19c (select + textarea submission); sections 1, 15-19c pass; flex/box screenshots unchanged.
+
 ## 2026-10-15 (v1.7 -- HTML5 element coverage)
 - Every HTML5 element gets a sensible UA default: ~20 more block elements, void/self-closing elements no longer leak a
   style-stack entry, hidden-by-default elements (`template svg math iframe object embed map datalist noembed`),
