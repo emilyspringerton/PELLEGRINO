@@ -9,6 +9,9 @@
   `embed-ack`. Slots 4000-4002. `tests/embed_test.c` + `scripts/embed_test.sh`: 9 checks (paint, click -> href range,
   ack, Tab+Enter) under `SDL_VIDEODRIVER=dummy`. The browser path (`pellegrino-run`) is untouched.
   Not built: Bazel target for the embed test (script only), the full smoke suite was NOT re-run on this change.
+- **`text-decoration: none` now removes the link underline** (depth slot 4003, deco kind 22; was parsed and ignored,
+  links were always underlined). Found dogfooding the OS menu. Verified by eye in an embed render and a headless
+  browser start; no smoke-suite assertion yet.
 
 ## 2026-10-15 (v1.10 -- UA default styling)
 - Founder real-time: "can we ensure we have some default styling on dom elements? ... in the case where the dev is

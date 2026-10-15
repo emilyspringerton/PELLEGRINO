@@ -800,15 +800,19 @@
   (do (slot-set 635 (slot-get 637)) (slot-set 29 0)))
 
 ;; text decoration (v1.8): an entry marks itself in field 21 (20 underline, 21 line-through) and bumps slot 631/632
+;; kind 22 = `text-decoration: none`: suppresses the link underline for the entry and its descendants (slot 4003 depth)
+(defn deco-slot [(kind : I32)] : I32
+  (if (= kind 22) 4003 (+ 611 kind)))
+
 (defn deco-mark [(kind : I32)] : I32
   (if (= (tget 21) 0)
-    (do (tset 21 kind) (slot-set (+ 611 kind) (+ (slot-get (+ 611 kind)) 1)) 0)
+    (do (tset 21 kind) (slot-set (deco-slot kind) (+ (slot-get (deco-slot kind)) 1)) 0)
     0))
 
 (defn deco-release [(sp : I32)] : I32
   (let [k (eget sp 21)]
-    (if (or (= k 20) (= k 21))
-      (slot-set (+ 611 k) (- (slot-get (+ 611 k)) 1))
+    (if (or (= k 20) (or (= k 21) (= k 22)))
+      (slot-set (deco-slot k) (- (slot-get (deco-slot k)) 1))
       0)))
 
 (defn pop-entry [] : I32
@@ -1033,7 +1037,7 @@
         gc (glyph-color ren i revealed hs ord)
         g1 (draw-glyph ren c px py s)
         g2 (if (= (tget 4) 1) (draw-glyph ren c (+ px 1) py s) 0)
-        u (if (>= hs 0) (sdl2-raw-render-fill-rect ren px (+ py (- ch 1)) cw 1) 0)
+        u (if (and (>= hs 0) (= (slot-get 4003) 0)) (sdl2-raw-render-fill-rect ren px (+ py (- ch 1)) cw 1) 0)
         h (if (>= hs 0) (link-hit px py cw ch hs he) 0)
         d1 (if (> (slot-get 631) 0) (sdl2-raw-render-fill-rect ren px (+ py (- ch 2)) cw 1) 0)
         d2 (if (> (slot-get 632) 0) (sdl2-raw-render-fill-rect ren px (+ py (/ ch 2)) cw 1) 0)]
@@ -1418,6 +1422,7 @@
   (cond
     ((= (has-tok page vs ve "underline") 1) (deco-mark 20))
     ((= (has-tok page vs ve "line-through") 1) (deco-mark 21))
+    ((= (has-tok page vs ve "none") 1) (deco-mark 22))
     (true 0)))
 
 ;; ---- CSS3 properties that have a representation here ----
@@ -3559,7 +3564,7 @@
       (slot-set 28 0) (slot-set 29 0) (slot-set 30 0) (slot-set 297 -1) (slot-set 1086 0)
       (slot-set 610 0) (slot-set 611 0) (slot-set 613 0) (slot-set 614 0) (slot-set 616 0) (slot-set 617 revealed)
       (slot-set 619 0) (slot-set 620 0) (slot-set 1091 -1) (slot-set 1094 -1)
-      (slot-set 631 0) (slot-set 632 0) (slot-set 633 0) (slot-set 634 0) (slot-set 635 0)
+      (slot-set 631 0) (slot-set 632 0) (slot-set 633 0) (slot-set 634 0) (slot-set 635 0) (slot-set 4003 0)
       (slot-set 640 0) (slot-set 641 0) (slot-set 1740 0) (slot-set 1639 0)
       (slot-set 1655 0) (slot-set 1656 0) (slot-set 1657 -1) (slot-set 1658 0) (slot-set 1660 0)
       (xset 0 3 0) (xset 0 7 0) (xset 0 8 0)
