@@ -51,25 +51,38 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   `../` dot-segment normalisation (left to the server), link hover/cursor, back/forward history, `<base href>`, `target=`. Hit-testing is cell-based and the
   link colour is not yet verified by eye (no screenshot tool on the build box).
 
-- **CSS-lite, box model, headings, markdown (v1.2):** see the table below. Everything is re-laid-out from the
-  first byte on every dirty frame, so rules and tags apply the instant their bytes land and the page *shifts*
-  as it streams (by design). **F12 or `x`** toggles author CSS; **F11 or `p`** toggles markdown rendering
+- **CSS, box model, headings, markdown (v1.2; CSS3 and async sheets in v1.9):** see the tables below. Everything is
+  re-laid-out from the first byte on every dirty frame, so rules and tags apply the instant their bytes land and the
+  page *shifts* as it streams, and again when an external stylesheet arrives (by design: layout shifts are embraced,
+  nothing is reserved or anchored). **F12 or `x`** toggles author CSS; **F11 or `p`** toggles markdown rendering
   (the status bar shows `css:on md:on`). With CSS off the UA defaults stay (h1-h6 sizes, link blue, bold/code),
   like a browser with author styles disabled.
 
   | Area | Supported | Not supported |
   |---|---|---|
-  | Sources | `<style>` blocks, inline `style=""`, `<font color>`, `bgcolor=` | external stylesheets (`<link>`), `@media`/`@import` (skipped) |
-  | Selectors | `tag`, `.class`, `#id`, `*`, comma lists | descendant/child/attribute/pseudo selectors, `tag.class`, specificity (source order wins) |
-  | Colors | `#rgb`, `#rrggbb`, `rgb()/rgba()` (alpha ignored), 23 named colors | `hsl()`, the other ~120 CSS names, `currentColor`, transparency |
-  | Properties | `color`, `background[-color]`, `font-size` (px/em/%/pt -> 4 glyph sizes), `font-weight`, `display: none/block/inline`, `margin[-side]`, `padding[-side]`, `border` (width + color), `width`, `max-width` (px/em/%, content-box), `display: flex` (row, equal columns) + `gap`, `flex-direction: column` | `height`/`min-*`, floats, `flex-wrap`/`flex-grow`/`flex-basis`/`justify-content`/`align-*`, nested flex, flex/grid, `text-align`, fonts, `border-radius`, per-side borders |
-  | Box model | margin / border / padding on block elements; `width`/`max-width` (a % is of the parent's content width, clamped to it); `margin-left/right: auto` (and `margin: 0 auto`) centre or push a fixed-width block; backgrounds fill the block's rows | `height`, margin collapsing, inline-block, tables as tables |
+  | Sources | `<style>` (honours `media=`), `<link rel=stylesheet href media>` (quoted or unquoted attributes), `@import`, inline `style=""`, `<font color>`, `bgcolor=` | `@font-face`, `@keyframes`, `@container`, `<link>` on file arguments (http(s) pages only), `rel=preload` |
+  | Selectors | `tag`, `.class`, `#id`, `*`, compounds (`a.b#c`), descendant and child (`>`), `[attr]` `[a=v]` `^= $= *= ~= \|=`, `:first-child`, `:nth-child(odd/even/N/an+b)`, `:not()`, `:is()`/`:where()`, `:root`, `:link`, `:checked`, `:disabled`, comma lists, **specificity** (ids, classes/attrs/pseudo, tags; ties by source order), `!important` | `+` and `~` combinators, `:last-child`/`:only-child`/`:nth-of-type`/`:empty`, `:hover`/`:focus`/`:active` (such rules never match), `::before`/`::after` (dropped) |
+  | At-rules | `@media` (`screen`/`all`, `and`, `not`, `,`, `min/max-width/height`, `(width >= 600px)`, `orientation`; `prefers-color-scheme: dark` is false), `@supports` (assumed true unless `not`), `@layer {}`, `@import url()`/`"..."` (sheet-relative, max 3 deep) | `print` and `speech` (never match) |
+  | Colors | `#rgb` `#rgba` `#rrggbb` `#rrggbbaa`, `rgb()`/`rgba()` (comma or space syntax, `%`), `hsl()`/`hsla()`, all CSS Color 3/4 names, `currentcolor`, `transparent`; alpha is blended over the nearest background (or the canvas) at parse time; gradients fall back to their first stop | colour spaces (`lab()`, `color-mix()`), real compositing |
+  | Values | `px em rem % pt pc in cm mm ch ex vw vh vmin vmax`, `calc()` (`+ - * /`, parentheses, nested, mixed units; `%` of the parent's width for `width`/`max-width`), `var(--x[, fallback])` (also inside shorthands) with custom properties (document-wide: the `:root` approximation) | `min()`/`max()`/`clamp()`, `var()` in `display`, negative lengths |
+  | Properties | `color`, `background[-color\|-image]`, `font`, `font-size` (lengths + keywords -> 4 glyph sizes), `font-weight`, `text-transform`, `display: none/block/inline/inline-block/list-item/flex/inline-flex` (row, equal columns) + `gap`, `flex-direction: column`, `margin[-side]`, `padding[-side]`, `border`, `border-left`, `border-color/-width/-style`, `width`, `max-width`, `box-sizing`, `text-decoration` | `height`/`min-*`, floats, `position`, `grid`, `flex-wrap`/`flex-grow`/`justify-content`/`align-*`, `text-align`, `border-radius`, `box-shadow`, `opacity`, `transform`, `transition`/`animation` (all parsed and ignored), top/right/bottom borders, italic/font-family (one 5x8 bitmap font) |
+  | Box model | margin / border / padding on block elements; `width`/`max-width` (a % is of the parent's content width, clamped to it; `box-sizing: border-box` honoured); `margin-left/right: auto` (and `margin: 0 auto`) centre or push a fixed-width block; backgrounds fill the block's rows; **links take an author `color`** (links used to ignore it) | `height`, margin collapsing, inline-block, tables as tables |
   | Headings | h1-h6 (glyph scale 4,3,2,2,2,1; h1-h3 bold, distinct colors) | |
   | Markdown | `#`..`######`, `- * +` bullets, `>` quote, fenced code, `---`, `**bold**`, `` `code` ``, `[text](url)` (a real, Tab-selectable link) for `.md`/`.markdown` URLs and file arguments | numbered lists, tables, images, `*italic*`/`_italic_`, nested lists, HTML blocks |
 
-  Limits: 64 rules, style stack depth 11, no word-wrap (breaks mid-word at the box edge), one 5x8 bitmap font.
-  Verified by eye in a headless (Xvfb) screenshot of a styled page and a markdown file; the smoke suite
-  checks rule collection, the toggles and markdown links, not pixels.
+  **Asynchronous stylesheets.** `<link rel=stylesheet>` and `@import` are discovered while the page is scanned and
+  queued; the page paints immediately with whatever rules it already has (inline `<style>`, UA defaults), and each
+  sheet is fetched through the stream module's second bank without blocking a frame: plain-`http` sheets start while
+  the page is still streaming, `https` sheets wait for the page stream to end (the TLS client holds one session), one
+  sheet at a time, pulled in bounded batches per frame, 700 idle frames (~6 s) of silence gives up. When a sheet
+  lands the whole page restyles from the first byte -- the layout shifts, by design -- and sheets apply in document
+  order (a late `<link>` still sits where it was written in the cascade). Logged as `css: fetch|loaded N bytes|failed
+  <url>` and `css: rules=N`. Connect and TLS handshake still block (same as `<img>`), a redirect is followed up to 3
+  hops, a sheet is capped at 96 KiB (store 256 KiB, 16 sheets, 160 rules, 48 custom properties, style stack depth 11).
+  Hostile input (huge, cyclic `@import`, malformed, binary junk, missing, refused) is covered by smoke section 20b.
+  Verified by eye in headless (Xvfb) screenshots (before/after a delayed sheet; ~30 selector/value cases) and by
+  pixel measurement for `calc()`, `vw`, `border-box` and `rgba()`; the HTTPS sheet path is the same code behind
+  `stream-connect-tls` but was **not exercised** here (no mbedTLS dev on the build box).
 
 - **Images (v1.5):** `<img src>` of an 8-bit non-interlaced **PNG** (RGB, RGBA, palette; decoded by PARENA's own
   `image/png`) is fetched over http/https once the page stream has closed, decoded, and drawn with nearest-neighbour
@@ -77,7 +90,7 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   no blending). Until it lands the tag shows `[img] alt`; a failure shows `![img] alt`, and the layout shifts when the
   pixels arrive. Limits: 2048 px a side and 262144 pixels, 2 MiB file, 24 images per page, one fetch per frame and
   each one is synchronous (up to ~3 s of silence while it runs), http(s) pages only (not file arguments), no JPEG/GIF/
-  WebP/SVG, no CSS `background-image`, images are not links-aware (a click on one is just a click). Verified live
+  WebP/SVG, no CSS `background-image` images, images are not links-aware (a click on one is just a click). Verified live
   over plain HTTP with RGBA/RGB/palette fixtures and a screenshot; the HTTPS image path is the same code behind
   `stream-connect-tls` but was not exercised on this box (no mbedTLS dev).
 

@@ -47,3 +47,11 @@ Read the monorepo root `CLAUDE.md` (The Emily Way) first; this file is repo-spec
   kind 7 (+2 = chosen index; its submitted value is re-read from the page); `<textarea>` is kind 1 seeded at first
   sight (only once `</textarea>` has arrived). **VS0 trap hit twice:** `(if (< gt 0) A B)` with the arms the wrong way
   round compiles fine -- check the polarity of every `-1`-means-missing guard.
+- CSS3 (v1.9): the rule table is slots 2100+6k sorted by specificity (k < 160; selectors are matched at apply time, right
+  to left, by `sel-match`); the ancestor table (`xget`) is 1500+10d; sheets are 3100+10k (k < 16, count 1640, fetch
+  state 1641-1643); custom properties 1740 (count) / 1750+4k; viewport 1646/1647; calc 1632-1634. A slot-map overlap
+  (sheet entries over the custom-property table) once crashed with "arena block alloc failed" -- when adding a table,
+  check the whole 0-4095 map. External CSS text lives in PARENA's static css store (`css-buf`); selectors and
+  declarations are (source, start, end) ranges into the page or that store. Never fetch a sheet over TLS while the
+  page's own TLS session is open (one session): https sheets wait for slot 4 < 0.
+

@@ -240,56 +240,294 @@
       -1
       (+ (* (* a 17) 65536) (+ (* (* b 17) 256) (* c 17))))))
 
+;; ---- colour (CSS3): #rgb #rgba #rrggbb #rrggbbaa rgb()/rgba() hsl()/hsla() names, alpha blended on the backdrop ----
+;; the colour behind the element being styled: the nearest ancestor background, else the page canvas
+(defn backdrop [] : I32
+  (loop [d (slot-get 31)]
+    (if (< d 0)
+      (if (>= (slot-get 296) 0) (slot-get 296) 1184274)
+      (if (>= (eget d 2) 0) (eget d 2) (recur (- d 1))))))
+
+(defn blend-ch [(c : I32) (b : I32) (a : I32)] : I32
+  (/ (+ (* c a) (* b (- 100 a))) 100))
+
+;; alpha a (0..100) of colour c over bg
+(defn blend [(c : I32) (a : I32) (bg : I32)] : I32
+  (+ (* (blend-ch (/ c 65536) (/ bg 65536) a) 65536)
+     (+ (* (blend-ch (mod (/ c 256) 256) (mod (/ bg 256) 256) a) 256)
+        (blend-ch (mod c 256) (mod bg 256) a))))
+
+(defn apply-alpha [(c : I32) (a : I32)] : I32
+  (cond
+    ((< c 0) -1)
+    ((>= a 100) c)
+    ((<= a 0) -1)
+    (true (blend c a (backdrop)))))
+
+(defn hex-nib [(page : String @ Region) (s : I32)] : I32
+  (let [d (hexd (string/char-at page s))]
+    (if (< d 0) -1 (* d 17))))
+
+(defn hex-alpha [(c : I32) (a255 : I32)] : I32
+  (if (or (< c 0) (< a255 0)) -1 (apply-alpha c (/ (* a255 100) 255))))
+
 (defn hex-col [(page : String @ Region) (s : I32) (e : I32)] : I32
   (let [n (- e s)]
     (cond
       ((= n 6) (hex-n page s 6))
       ((= n 3) (hex3 page s))
+      ((= n 8) (hex-alpha (hex-n page s 6) (hex-n page (+ s 6) 2)))
+      ((= n 4) (hex-alpha (hex3 page s) (hex-nib page (+ s 3))))
       (true -1))))
 
-(defn min255 [(v : I32)] : I32
-  (if (> v 255) 255 v))
+;; one rgb() channel: a number or a percentage; the index past it lands in slot 601
+(defn chan255 [(page : String @ Region) (i : I32) (e : I32)] : I32
+  (let [v (scan-int page i e)
+        p (slot-get 601)
+        pct (if (and (< p e) (= (string/char-at page p) 37)) 1 0)
+        c (if (= pct 1) (/ (* v 255) 100) v)]
+    (ret-pos (if (= pct 1) (+ p 1) p) (min255 c))))
 
-;; rgb(r, g, b) / rgba(r, g, b, a); s is at the 'r'
+(defn alpha-skip [(page : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [k i]
+    (if (>= k e)
+      e
+      (let [c (string/char-at page k)]
+        (if (or (ws? c) (or (= c 44) (= c 47))) (recur (+ k 1)) k)))))
+
+;; alpha at a: 0.5 / .5 / 1 / 50%  ->  0..100
+(defn alpha-num [(page : String @ Region) (a : I32) (e : I32)] : I32
+  (let [c0 (string/char-at page a)
+        ip (if (= c0 46) (ret-pos a 0) (scan-int page a e))
+        p (slot-get 601)
+        isf (if (and (< p e) (= (string/char-at page p) 46)) 1 0)
+        d1 (if (= isf 1) (frac-digit page (+ p 1) e) 0)
+        d2 (if (= isf 1) (frac-digit page (+ p 2) e) 0)
+        q (if (= isf 1) (skip-digits page (+ p 1) e) p)
+        pct (if (and (< q e) (= (string/char-at page q) 37)) 1 0)
+        v (if (= pct 1) ip (+ (* ip 100) (+ (* d1 10) d2)))]
+    (if (> v 100) 100 v)))
+
+(defn alpha100 [(page : String @ Region) (i : I32) (e : I32)] : I32
+  (let [a (alpha-skip page i e)]
+    (if (or (>= a e) (= (string/char-at page a) 41))
+      100
+      (alpha-num page a e))))
+
+;; rgb(r, g, b) / rgba(r, g, b, a) / rgb(r g b / a); s is at the 'r'
 (defn rgb-col [(page : String @ Region) (s : I32) (e : I32)] : I32
   (let [o (find-in page 40 s e)]
     (if (< o 0)
       -1
-      (let [r (scan-int page (+ o 1) e)
+      (let [r (chan255 page (+ o 1) e)
             p1 (slot-get 601)
-            g (scan-int page p1 e)
+            g (chan255 page p1 e)
             p2 (slot-get 601)
-            b (scan-int page p2 e)]
-        (+ (* (min255 r) 65536) (+ (* (min255 g) 256) (min255 b)))))))
+            b (chan255 page p2 e)
+            p3 (slot-get 601)
+            al (alpha100 page p3 e)]
+        (apply-alpha (+ (* r 65536) (+ (* g 256) b)) al)))))
 
+(defn hsl-comp [(sector : I32) (c : I32) (x : I32) (k : I32)] : I32
+  (cond
+    ((= sector 0) (if (= k 0) c (if (= k 1) x 0)))
+    ((= sector 1) (if (= k 0) x (if (= k 1) c 0)))
+    ((= sector 2) (if (= k 0) 0 (if (= k 1) c x)))
+    ((= sector 3) (if (= k 0) 0 (if (= k 1) x c)))
+    ((= sector 4) (if (= k 0) x (if (= k 1) 0 c)))
+    (true (if (= k 0) c (if (= k 1) 0 x)))))
+
+(defn hsl-ch [(sector : I32) (c : I32) (x : I32) (m : I32) (k : I32)] : I32
+  (min255 (/ (* (+ (hsl-comp sector c x k) m) 255) 1000)))
+
+;; h 0..359, s and l 0..1000 -> 0xRRGGBB
+(defn hsl-rgb [(h : I32) (s : I32) (l : I32)] : I32
+  (let [l2 (- (* 2 l) 1000)
+        al (if (< l2 0) (- 0 l2) l2)
+        c (/ (* (- 1000 al) s) 1000)
+        hp (/ (* h 1000) 60)
+        hm (mod hp 2000)
+        x0 (- hm 1000)
+        ax (if (< x0 0) (- 0 x0) x0)
+        x (/ (* c (- 1000 ax)) 1000)
+        m (- l (/ c 2))
+        sec (/ h 60)]
+    (+ (* (hsl-ch sec c x m 0) 65536) (+ (* (hsl-ch sec c x m 1) 256) (hsl-ch sec c x m 2)))))
+
+(defn skip-pct [(page : String @ Region) (p : I32) (e : I32)] : I32
+  (if (and (< p e) (= (string/char-at page p) 37)) (+ p 1) p))
+
+(defn min1000 [(v : I32)] : I32
+  (if (> v 1000) 1000 v))
+
+;; hsl(h, s%, l%) / hsla(h, s%, l%, a) / hsl(h s l / a)
+(defn hsl-col [(page : String @ Region) (s : I32) (e : I32)] : I32
+  (let [o (find-in page 40 s e)]
+    (if (< o 0)
+      -1
+      (let [h (scan-int page (+ o 1) e)
+            p1 (slot-get 601)
+            sat (scan-int page p1 e)
+            p2 (slot-get 601)
+            lig (scan-int page p2 e)
+            p3 (slot-get 601)
+            al (alpha100 page (skip-pct page p3 e) e)]
+        (apply-alpha (hsl-rgb (mod h 360) (min1000 (* sat 10)) (min1000 (* lig 10))) al)))))
+
+;; the CSS Color 3/4 named colours (148)
 (defn name-col [(page : String @ Region) (s : I32) (e : I32)] : I32
   (cond
-    ((= (word-eq page s e "black") 1) 0)
-    ((= (word-eq page s e "white") 1) 16777215)
-    ((= (word-eq page s e "red") 1) 16711680)
-    ((= (word-eq page s e "green") 1) 32768)
-    ((= (word-eq page s e "lime") 1) 65280)
-    ((= (word-eq page s e "blue") 1) 255)
-    ((= (word-eq page s e "yellow") 1) 16776960)
-    ((= (word-eq page s e "cyan") 1) 65535)
+    ((= (word-eq page s e "aliceblue") 1) 15792383)
+    ((= (word-eq page s e "antiquewhite") 1) 16444375)
     ((= (word-eq page s e "aqua") 1) 65535)
-    ((= (word-eq page s e "magenta") 1) 16711935)
-    ((= (word-eq page s e "fuchsia") 1) 16711935)
-    ((= (word-eq page s e "gray") 1) 8421504)
-    ((= (word-eq page s e "grey") 1) 8421504)
-    ((= (word-eq page s e "silver") 1) 12632256)
-    ((= (word-eq page s e "maroon") 1) 8388608)
-    ((= (word-eq page s e "olive") 1) 8421376)
-    ((= (word-eq page s e "teal") 1) 32896)
-    ((= (word-eq page s e "navy") 1) 128)
-    ((= (word-eq page s e "purple") 1) 8388736)
-    ((= (word-eq page s e "orange") 1) 16753920)
-    ((= (word-eq page s e "pink") 1) 16761035)
+    ((= (word-eq page s e "aquamarine") 1) 8388564)
+    ((= (word-eq page s e "azure") 1) 15794175)
+    ((= (word-eq page s e "beige") 1) 16119260)
+    ((= (word-eq page s e "bisque") 1) 16770244)
+    ((= (word-eq page s e "black") 1) 0)
+    ((= (word-eq page s e "blanchedalmond") 1) 16772045)
+    ((= (word-eq page s e "blue") 1) 255)
+    ((= (word-eq page s e "blueviolet") 1) 9055202)
     ((= (word-eq page s e "brown") 1) 10824234)
+    ((= (word-eq page s e "burlywood") 1) 14596231)
+    ((= (word-eq page s e "cadetblue") 1) 6266528)
+    ((= (word-eq page s e "chartreuse") 1) 8388352)
+    ((= (word-eq page s e "chocolate") 1) 13789470)
+    ((= (word-eq page s e "coral") 1) 16744272)
+    ((= (word-eq page s e "cornflowerblue") 1) 6591981)
+    ((= (word-eq page s e "cornsilk") 1) 16775388)
+    ((= (word-eq page s e "crimson") 1) 14423100)
+    ((= (word-eq page s e "cyan") 1) 65535)
+    ((= (word-eq page s e "darkblue") 1) 139)
+    ((= (word-eq page s e "darkcyan") 1) 35723)
+    ((= (word-eq page s e "darkgoldenrod") 1) 12092939)
+    ((= (word-eq page s e "darkgray") 1) 11119017)
+    ((= (word-eq page s e "darkgreen") 1) 25600)
+    ((= (word-eq page s e "darkgrey") 1) 11119017)
+    ((= (word-eq page s e "darkkhaki") 1) 12433259)
+    ((= (word-eq page s e "darkmagenta") 1) 9109643)
+    ((= (word-eq page s e "darkolivegreen") 1) 5597999)
+    ((= (word-eq page s e "darkorange") 1) 16747520)
+    ((= (word-eq page s e "darkorchid") 1) 10040012)
+    ((= (word-eq page s e "darkred") 1) 9109504)
+    ((= (word-eq page s e "darksalmon") 1) 15308410)
+    ((= (word-eq page s e "darkseagreen") 1) 9419919)
+    ((= (word-eq page s e "darkslateblue") 1) 4734347)
+    ((= (word-eq page s e "darkslategray") 1) 3100495)
+    ((= (word-eq page s e "darkslategrey") 1) 3100495)
+    ((= (word-eq page s e "darkturquoise") 1) 52945)
+    ((= (word-eq page s e "darkviolet") 1) 9699539)
+    ((= (word-eq page s e "deeppink") 1) 16716947)
+    ((= (word-eq page s e "deepskyblue") 1) 49151)
+    ((= (word-eq page s e "dimgray") 1) 6908265)
+    ((= (word-eq page s e "dimgrey") 1) 6908265)
+    ((= (word-eq page s e "dodgerblue") 1) 2003199)
+    ((= (word-eq page s e "firebrick") 1) 11674146)
+    ((= (word-eq page s e "floralwhite") 1) 16775920)
+    ((= (word-eq page s e "forestgreen") 1) 2263842)
+    ((= (word-eq page s e "fuchsia") 1) 16711935)
+    ((= (word-eq page s e "gainsboro") 1) 14474460)
+    ((= (word-eq page s e "ghostwhite") 1) 16316671)
     ((= (word-eq page s e "gold") 1) 16766720)
+    ((= (word-eq page s e "goldenrod") 1) 14329120)
+    ((= (word-eq page s e "gray") 1) 8421504)
+    ((= (word-eq page s e "green") 1) 32768)
+    ((= (word-eq page s e "greenyellow") 1) 11403055)
+    ((= (word-eq page s e "grey") 1) 8421504)
+    ((= (word-eq page s e "honeydew") 1) 15794160)
+    ((= (word-eq page s e "hotpink") 1) 16738740)
+    ((= (word-eq page s e "indianred") 1) 13458524)
+    ((= (word-eq page s e "indigo") 1) 4915330)
+    ((= (word-eq page s e "ivory") 1) 16777200)
+    ((= (word-eq page s e "khaki") 1) 15787660)
+    ((= (word-eq page s e "lavender") 1) 15132410)
+    ((= (word-eq page s e "lavenderblush") 1) 16773365)
+    ((= (word-eq page s e "lawngreen") 1) 8190976)
+    ((= (word-eq page s e "lemonchiffon") 1) 16775885)
+    ((= (word-eq page s e "lightblue") 1) 11393254)
+    ((= (word-eq page s e "lightcoral") 1) 15761536)
+    ((= (word-eq page s e "lightcyan") 1) 14745599)
+    ((= (word-eq page s e "lightgoldenrodyellow") 1) 16448210)
+    ((= (word-eq page s e "lightgray") 1) 13882323)
+    ((= (word-eq page s e "lightgreen") 1) 9498256)
+    ((= (word-eq page s e "lightgrey") 1) 13882323)
+    ((= (word-eq page s e "lightpink") 1) 16758465)
+    ((= (word-eq page s e "lightsalmon") 1) 16752762)
+    ((= (word-eq page s e "lightseagreen") 1) 2142890)
+    ((= (word-eq page s e "lightskyblue") 1) 8900346)
+    ((= (word-eq page s e "lightslategray") 1) 7833753)
+    ((= (word-eq page s e "lightslategrey") 1) 7833753)
+    ((= (word-eq page s e "lightsteelblue") 1) 11584734)
+    ((= (word-eq page s e "lightyellow") 1) 16777184)
+    ((= (word-eq page s e "lime") 1) 65280)
+    ((= (word-eq page s e "limegreen") 1) 3329330)
+    ((= (word-eq page s e "linen") 1) 16445670)
+    ((= (word-eq page s e "magenta") 1) 16711935)
+    ((= (word-eq page s e "maroon") 1) 8388608)
+    ((= (word-eq page s e "mediumaquamarine") 1) 6737322)
+    ((= (word-eq page s e "mediumblue") 1) 205)
+    ((= (word-eq page s e "mediumorchid") 1) 12211667)
+    ((= (word-eq page s e "mediumpurple") 1) 9662683)
+    ((= (word-eq page s e "mediumseagreen") 1) 3978097)
+    ((= (word-eq page s e "mediumslateblue") 1) 8087790)
+    ((= (word-eq page s e "mediumspringgreen") 1) 64154)
+    ((= (word-eq page s e "mediumturquoise") 1) 4772300)
+    ((= (word-eq page s e "mediumvioletred") 1) 13047173)
+    ((= (word-eq page s e "midnightblue") 1) 1644912)
+    ((= (word-eq page s e "mintcream") 1) 16121850)
+    ((= (word-eq page s e "mistyrose") 1) 16770273)
+    ((= (word-eq page s e "moccasin") 1) 16770229)
+    ((= (word-eq page s e "navajowhite") 1) 16768685)
+    ((= (word-eq page s e "navy") 1) 128)
+    ((= (word-eq page s e "oldlace") 1) 16643558)
+    ((= (word-eq page s e "olive") 1) 8421376)
+    ((= (word-eq page s e "olivedrab") 1) 7048739)
+    ((= (word-eq page s e "orange") 1) 16753920)
+    ((= (word-eq page s e "orangered") 1) 16729344)
+    ((= (word-eq page s e "orchid") 1) 14315734)
+    ((= (word-eq page s e "palegoldenrod") 1) 15657130)
+    ((= (word-eq page s e "palegreen") 1) 10025880)
+    ((= (word-eq page s e "paleturquoise") 1) 11529966)
+    ((= (word-eq page s e "palevioletred") 1) 14381203)
+    ((= (word-eq page s e "papayawhip") 1) 16773077)
+    ((= (word-eq page s e "peachpuff") 1) 16767673)
+    ((= (word-eq page s e "peru") 1) 13468991)
+    ((= (word-eq page s e "pink") 1) 16761035)
+    ((= (word-eq page s e "plum") 1) 14524637)
+    ((= (word-eq page s e "powderblue") 1) 11591910)
+    ((= (word-eq page s e "purple") 1) 8388736)
+    ((= (word-eq page s e "rebeccapurple") 1) 6697881)
+    ((= (word-eq page s e "red") 1) 16711680)
+    ((= (word-eq page s e "rosybrown") 1) 12357519)
+    ((= (word-eq page s e "royalblue") 1) 4286945)
+    ((= (word-eq page s e "saddlebrown") 1) 9127187)
+    ((= (word-eq page s e "salmon") 1) 16416882)
+    ((= (word-eq page s e "sandybrown") 1) 16032864)
+    ((= (word-eq page s e "seagreen") 1) 3050327)
+    ((= (word-eq page s e "seashell") 1) 16774638)
+    ((= (word-eq page s e "sienna") 1) 10506797)
+    ((= (word-eq page s e "silver") 1) 12632256)
+    ((= (word-eq page s e "skyblue") 1) 8900331)
+    ((= (word-eq page s e "slateblue") 1) 6970061)
+    ((= (word-eq page s e "slategray") 1) 7372944)
+    ((= (word-eq page s e "slategrey") 1) 7372944)
+    ((= (word-eq page s e "snow") 1) 16775930)
+    ((= (word-eq page s e "springgreen") 1) 65407)
+    ((= (word-eq page s e "steelblue") 1) 4620980)
+    ((= (word-eq page s e "tan") 1) 13808780)
+    ((= (word-eq page s e "teal") 1) 32896)
+    ((= (word-eq page s e "thistle") 1) 14204888)
+    ((= (word-eq page s e "tomato") 1) 16737095)
+    ((= (word-eq page s e "turquoise") 1) 4251856)
+    ((= (word-eq page s e "violet") 1) 15631086)
+    ((= (word-eq page s e "wheat") 1) 16113331)
+    ((= (word-eq page s e "white") 1) 16777215)
+    ((= (word-eq page s e "whitesmoke") 1) 16119285)
+    ((= (word-eq page s e "yellow") 1) 16776960)
+    ((= (word-eq page s e "yellowgreen") 1) 10145074)
     (true -1)))
 
-;; color of the token page[s0,e0): #rgb #rrggbb rgb(...) or a name; -1 when it is none of those
+;; color of the token page[s0,e0): #hex rgb() hsl() a name, currentcolor; -1 when it is none of those (or transparent)
 (defn parse-color [(page : String @ Region) (s0 : I32) (e0 : I32)] : I32
   (let [s (skip-ws page s0 e0)
         e (trim-end page s e0)]
@@ -297,17 +535,183 @@
       ((>= s e) -1)
       ((= (string/char-at page s) 35) (hex-col page (+ s 1) e))
       ((= (has-at page s e "rgb") 1) (rgb-col page s e))
+      ((= (has-at page s e "hsl") 1) (hsl-col page s e))
+      ((= (word-eq page s e "transparent") 1) -1)
+      ((= (word-eq page s e "currentcolor") 1) (tget 1))
       (true (name-col page s e)))))
 
-;; first token of page[vs,ve) that is a color (for `background: url(..) no-repeat #fff` and `border: 1px solid red`)
+;; end of a colour token: whitespace or ',' at paren depth 0
+(defn ctok-end [(page : String @ Region) (a : I32) (e : I32)] : I32
+  (loop [k a depth 0]
+    (if (>= k e)
+      e
+      (let [c (string/char-at page k)]
+        (cond
+          ((= c 40) (recur (+ k 1) (+ depth 1)))
+          ((= c 41) (recur (+ k 1) (if (> depth 0) (- depth 1) 0)))
+          ((and (= depth 0) (or (ws? c) (= c 44))) k)
+          (true (recur (+ k 1) depth)))))))
+
+(defn skip-wsc [(page : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [k i]
+    (if (>= k e)
+      e
+      (let [c (string/char-at page k)]
+        (if (or (ws? c) (= c 44)) (recur (+ k 1)) k)))))
+
+;; where to look next when the token page[a,b) was not a colour: inside a non-colour function (gradients), else past it
+(defn color-next [(page : String @ Region) (a : I32) (b : I32)] : I32
+  (let [o (find-in page 40 a b)]
+    (if (and (>= o 0) (and (= (has-at page a b "rgb") 0) (= (has-at page a b "hsl") 0)))
+      (+ o 1)
+      (if (> b a) b (+ a 1)))))
+
+;; first token of page[vs,ve) that is a colour (for `background: url(..) no-repeat #fff`, `border: 1px solid red`,
+;; and gradients, whose first stop is taken)
 (defn first-color [(page : String @ Region) (vs : I32) (ve : I32)] : I32
   (loop [k vs]
-    (let [a (skip-ws page k ve)]
+    (let [a (skip-wsc page k ve)]
       (if (>= a ve)
         -1
-        (let [b (tok-end page a ve)
+        (let [b (ctok-end page a ve)
               c (parse-color page a b)]
-          (if (>= c 0) c (recur b)))))))
+          (if (>= c 0) c (recur (color-next page a b))))))))
+
+;; ---- lengths (CSS3 units, calc()) ----
+(defn frac2 [(page : String @ Region) (p : I32) (e : I32)] : I32
+  (+ (* (frac-digit page p e) 10) (frac-digit page (+ p 1) e)))
+
+;; value * 100 of the number at s (digits, optional fraction; capped at 10000); the index past it lands in slot 601
+(defn css-num100 [(page : String @ Region) (s : I32) (e : I32)] : I32
+  (let [ip0 (if (= (string/char-at page s) 46) (ret-pos s 0) (scan-int page s e))
+        ip (if (> ip0 10000) 10000 ip0)
+        p (slot-get 601)
+        hasf (if (and (< p e) (= (string/char-at page p) 46)) 1 0)
+        f (if (= hasf 1) (frac2 page (+ p 1) e) 0)
+        q (if (= hasf 1) (skip-digits page (+ p 1) e) p)]
+    (ret-pos q (+ (* ip 100) f))))
+
+(defn vmin-px [] : I32
+  (if (< (slot-get 1646) (slot-get 1647)) (slot-get 1646) (slot-get 1647)))
+
+(defn vmax-px [] : I32
+  (if (> (slot-get 1646) (slot-get 1647)) (slot-get 1646) (slot-get 1647)))
+
+;; v = value * 100 in the unit at page[u,e) -> px * 100. % is of slot 1634 (16 px unless a width is being resolved)
+(defn unit-px100 [(page : String @ Region) (u : I32) (e : I32) (v : I32)] : I32
+  (cond
+    ((= (has-at page u e "rem") 1) (* v 16))
+    ((= (has-at page u e "em") 1) (* v 16))
+    ((= (has-at page u e "px") 1) v)
+    ((= (has-at page u e "%") 1) (/ (* v (slot-get 1634)) 100))
+    ((= (has-at page u e "pt") 1) (/ (* v 4) 3))
+    ((= (has-at page u e "pc") 1) (* v 16))
+    ((= (has-at page u e "vmin") 1) (/ (* v (vmin-px)) 100))
+    ((= (has-at page u e "vmax") 1) (/ (* v (vmax-px)) 100))
+    ((= (has-at page u e "vw") 1) (/ (* v (slot-get 1646)) 100))
+    ((= (has-at page u e "vh") 1) (/ (* v (slot-get 1647)) 100))
+    ((= (has-at page u e "ch") 1) (* v 12))
+    ((= (has-at page u e "ex") 1) (* v 9))
+    ((= (has-at page u e "cm") 1) (/ (* v 378) 10))
+    ((= (has-at page u e "mm") 1) (/ (* v 378) 100))
+    ((= (has-at page u e "in") 1) (* v 96))
+    (true v)))
+
+;; "12px" "1.5em" "50%" "2vw" "2" -> px (rem/em 16 px, % of 16 px); only for tokens that start with a digit
+(defn len-num [(page : String @ Region) (s : I32) (e : I32)] : I32
+  (let [v (css-num100 page s e)
+        u (slot-get 601)]
+    (/ (unit-px100 page u e v) 100)))
+
+(defn unit-end [(page : String @ Region) (u : I32) (e : I32)] : I32
+  (loop [k u]
+    (if (and (< k e) (or (letter? (string/char-at page k)) (= (string/char-at page k) 37)))
+      (recur (+ k 1))
+      k)))
+
+(defn calc-number [(page : String @ Region)] : I32
+  (let [e (slot-get 1632)
+        p (skip-ws page (slot-get 1633) e)
+        c (string/char-at page p)
+        st (if (or (= c 45) (= c 43)) (+ p 1) p)
+        v (css-num100 page st e)
+        u (slot-get 601)
+        px (unit-px100 page u e v)
+        sv (slot-set 1633 (unit-end page u e))]
+    (if (= c 45) (- 0 px) px)))
+
+(defn calc-factor [(page : String @ Region)] : I32
+  (let [p (skip-ws page (slot-get 1633) (slot-get 1632))
+        c (string/char-at page p)]
+    (cond
+      ((= c 40) (calc-group page (+ p 1)))
+      ((= (has-at page p (slot-get 1632) "calc(") 1) (calc-group page (+ p 5)))
+      (true (calc-number page)))))
+
+(defn calc-group [(page : String @ Region) (after : I32)] : I32
+  (let [sv (slot-set 1633 after)
+        v (calc-sum page)
+        p (skip-ws page (slot-get 1633) (slot-get 1632))
+        sc (if (= (string/char-at page p) 41) (slot-set 1633 (+ p 1)) 0)]
+    v))
+
+(defn calc-mul [(a : I32) (b : I32)] : I32
+  (/ (* a b) 100))
+
+(defn calc-div [(a : I32) (b : I32)] : I32
+  (if (= b 0) 0 (/ (* a 100) b)))
+
+(defn calc-prod [(page : String @ Region)] : I32
+  (calc-prod-rest page (calc-factor page)))
+
+(defn calc-prod-rest [(page : String @ Region) (acc : I32)] : I32
+  (let [p (skip-ws page (slot-get 1633) (slot-get 1632))
+        c (string/char-at page p)]
+    (cond
+      ((>= p (slot-get 1632)) acc)
+      ((= c 42) (do (slot-set 1633 (+ p 1)) (calc-prod-rest page (calc-mul acc (calc-factor page)))))
+      ((= c 47) (do (slot-set 1633 (+ p 1)) (calc-prod-rest page (calc-div acc (calc-factor page)))))
+      (true acc))))
+
+(defn calc-sum [(page : String @ Region)] : I32
+  (calc-sum-rest page (calc-prod page)))
+
+(defn calc-sum-rest [(page : String @ Region) (acc : I32)] : I32
+  (let [p (skip-ws page (slot-get 1633) (slot-get 1632))
+        c (string/char-at page p)]
+    (cond
+      ((>= p (slot-get 1632)) acc)
+      ((= c 43) (do (slot-set 1633 (+ p 1)) (calc-sum-rest page (+ acc (calc-prod page)))))
+      ((= c 45) (do (slot-set 1633 (+ p 1)) (calc-sum-rest page (- acc (calc-prod page)))))
+      (true acc))))
+
+;; calc(...) at page[s,e) -> px (clamped at 0), % taken of pw px; -1 when it is not a calc()
+(defn calc-eval [(page : String @ Region) (s : I32) (e : I32) (pw : I32)] : I32
+  (let [o (find-in page 40 s e)
+        c (if (< o 0) e (paren-close page (+ o 1) e))
+        a (slot-set 1633 (+ o 1))
+        b (slot-set 1632 c)
+        d (slot-set 1634 pw)
+        v (calc-sum page)
+        r (slot-set 1634 16)]
+    (cond
+      ((< o 0) -1)
+      ((< v 0) 0)
+      (true (/ (+ v 50) 100)))))
+
+(defn parse-len [(page : String @ Region) (s0 : I32) (e0 : I32)] : I32
+  (let [s (skip-ws page s0 e0)
+        e (trim-end page s e0)]
+    (cond
+      ((>= s e) -1)
+      ((= (word-eq page s e "auto") 1) 0)
+      ((= (has-at page s e "calc(") 1) (calc-eval page s e 16))
+      ((or (digit? (string/char-at page s)) (= (string/char-at page s) 46)) (len-num page s e))
+      (true -1))))
+
+
+(defn min255 [(v : I32)] : I32
+  (if (> v 255) 255 v))
 
 (defn has-tok [(page : String @ Region) (vs : I32) (ve : I32) (lit : String @ Region)] : I32
   (loop [k vs]
@@ -321,30 +725,6 @@
   (if (and (< p e) (digit? (string/char-at page p)))
     (- (string/char-at page p) 48)
     0))
-
-;; "12px" "1.5em" "50%" "2" "auto" -> px (em/rem = 16 px, % of 16 px); -1 when not a length
-(defn len-num [(page : String @ Region) (s : I32) (e : I32)] : I32
-  (let [ip (scan-int page s e)
-        p (slot-get 601)
-        hasf (and (< p e) (= (string/char-at page p) 46))
-        fd (if hasf (frac-digit page (+ p 1) e) 0)
-        u (if hasf (skip-digits page (+ p 1) e) p)
-        v10 (+ (* ip 10) fd)]
-    (cond
-      ((= (has-at page u e "rem") 1) (/ (* v10 16) 10))
-      ((= (has-at page u e "em") 1) (/ (* v10 16) 10))
-      ((= (has-at page u e "%") 1) (/ (* v10 16) 1000))
-      ((= (has-at page u e "pt") 1) (/ (* v10 4) 30))
-      (true (/ v10 10)))))
-
-(defn parse-len [(page : String @ Region) (s0 : I32) (e0 : I32)] : I32
-  (let [s (skip-ws page s0 e0)
-        e (trim-end page s e0)]
-    (cond
-      ((>= s e) -1)
-      ((= (word-eq page s e "auto") 1) 0)
-      ((digit? (string/char-at page s)) (len-num page s e))
-      (true -1))))
 
 (defn push-len [(v : I32)] : I32
   (if (< v 0)
@@ -563,12 +943,27 @@
   (if (= (tget 11) 0) (tget 2) -1))
 
 ;; glyph color: link blue (inverse when selected), fresh bytes amber, author color, default grey
+;; 1 when the innermost open <a> (or something inside it) was given a colour by a stylesheet rule / style=""
+(defn link-color? [] : I32
+  (if (= (slot-get 24) 0)
+    0
+    (let [h (hash-range "a" 0 1)]
+      (loop [d (slot-get 31)]
+        (if (< d 1)
+          0
+          (if (= (eget d 0) h) (xget d 9) (recur (- d 1))))))))
+
+(defn link-glyph [(ren : I32)] : I32
+  (if (and (= (link-color?) 1) (>= (tget 1) 0))
+    (set-color ren (tget 1))
+    (sdl2-raw-set-draw-color ren 96 165 250 255)))
+
 (defn glyph-color [(ren : I32) (i : I32) (revealed : I32) (hs : I32) (ord : I32)] : I32
   (cond
     ((>= hs 0)
      (if (= ord (slot-get 18))
        (sdl2-raw-set-draw-color ren 18 18 18 255)
-       (sdl2-raw-set-draw-color ren 96 165 250 255)))
+       (link-glyph ren)))
     ((and (= (slot-get 11) 1) (< (- revealed i) 160))
      (sdl2-raw-set-draw-color ren 255 176 64 255))
     ((>= (tget 1) 0) (set-color ren (tget 1)))
@@ -606,7 +1001,7 @@
 (defn do-clear-nl [] : I32
   (do (slot-set 635 0) (slot-set 636 0) 0))
 
-(defn put-char [(c : I32) (i : I32) (revealed : I32) (hs : I32) (he : I32) (ord : I32)] : I32
+(defn put-char-raw [(c : I32) (i : I32) (revealed : I32) (hs : I32) (he : I32) (ord : I32)] : I32
   (if (hidden?)
     0
     (let [s (tget 3)
@@ -617,6 +1012,24 @@
           v (if (row-vis? r) (draw-vis c i revealed hs he ord s cw r col) 0)
           cl (if (> c 32) (do-clear-nl) 0)]
       (slot-set 32 (+ col cw)))))
+
+;; text-transform (CSS3): upper/lower/capitalize letters as they are drawn (ASCII; the glyph set is ASCII)
+(defn tt-char [(c : I32)] : I32
+  (let [m0 (xget (slot-get 31) 7)
+        m (if (= (slot-get 24) 1) m0 0)
+        prev (slot-get 1639)
+        up (if (and (>= c 97) (<= c 122)) (- c 32) c)
+        lo (if (and (>= c 65) (<= c 90)) (+ c 32) c)
+        r (cond
+            ((= m 1) up)
+            ((= m 2) lo)
+            ((= m 3) (if (= prev 0) up c))
+            (true c))
+        sv (slot-set 1639 (if (or (letter? c) (digit? c)) 1 0))]
+    r))
+
+(defn put-char [(c : I32) (i : I32) (revealed : I32) (hs : I32) (he : I32) (ord : I32)] : I32
+  (put-char-raw (tt-char c) i revealed hs he ord))
 
 ;; ---- opening and closing elements ----
 (defn name-end [(page : String @ Region) (s : I32) (lim : I32)] : I32
@@ -811,7 +1224,7 @@
 
 ;; ---- author CSS ----
 (defn set-fg [(c : I32)] : I32
-  (if (>= c 0) (tset 1 c) 0))
+  (if (>= c 0) (do (xset (slot-get 31) 9 1) (tset 1 c)) 0))
 
 (defn set-bg [(c : I32)] : I32
   (if (>= c 0) (tset 2 c) 0))
@@ -866,6 +1279,7 @@
       ((= (word-eq page a b "inline") 1) (tset 11 0))
       ((= (word-eq page a b "inline-block") 1) (tset 11 0))
       ((= (word-eq page a b "flex") 1) (flex-claim page))
+      ((= (word-eq page a b "inline-flex") 1) (flex-claim page))
       (true 0))))
 
 (defn rows-m [(px : I32)] : I32
@@ -877,6 +1291,7 @@
         e (trim-end page s ve)]
     (cond
       ((>= s e) -1)
+      ((= (has-at page s e "calc(") 1) (calc-eval page s e pw))
       ((not (digit? (string/char-at page s))) -1)
       ((>= (find-in page 37 s e) 0) (/ (* (scan-int page s e) pw) 100))
       (true (len-num page s e)))))
@@ -940,12 +1355,109 @@
     ((= (has-tok page vs ve "line-through") 1) (deco-mark 21))
     (true 0)))
 
+;; ---- CSS3 properties that have a representation here ----
+(defn set-size-kw [(page : String @ Region) (a : I32) (b : I32)] : I32
+  (cond
+    ((= (word-eq page a b "xx-small") 1) (tset 3 1))
+    ((= (word-eq page a b "x-small") 1) (tset 3 1))
+    ((= (word-eq page a b "small") 1) (tset 3 2))
+    ((= (word-eq page a b "medium") 1) (tset 3 2))
+    ((= (word-eq page a b "large") 1) (tset 3 2))
+    ((= (word-eq page a b "x-large") 1) (tset 3 3))
+    ((= (word-eq page a b "xx-large") 1) (tset 3 4))
+    ((= (word-eq page a b "larger") 1) (tset 3 (if (< (tget 3) 4) (+ (tget 3) 1) 4)))
+    ((= (word-eq page a b "smaller") 1) (tset 3 (if (> (tget 3) 1) (- (tget 3) 1) 1)))
+    (true 0)))
+
+(defn font-size-set [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (let [a (skip-ws page vs ve)
+        b (tok-end page a ve)
+        c (string/char-at page a)]
+    (if (or (digit? c) (= c 46))
+      (set-size (parse-len page vs ve))
+      (if (= (has-at page a ve "calc(") 1)
+        (set-size (parse-len page vs ve))
+        (set-size-kw page a b)))))
+
+;; 1 when the token page[a,b) carries a unit (a letter or %)
+(defn tok-unit? [(page : String @ Region) (a : I32) (b : I32)] : I32
+  (loop [k a]
+    (if (>= k b)
+      0
+      (if (or (letter? (string/char-at page k)) (= (string/char-at page k) 37)) 1 (recur (+ k 1))))))
+
+(defn font-tok [(page : String @ Region) (a : I32) (b : I32)] : I32
+  (let [c (string/char-at page a)]
+    (cond
+      ((= (word-eq page a b "bold") 1) (tset 4 1))
+      ((= (word-eq page a b "bolder") 1) (tset 4 1))
+      ((and (= (- b a) 3) (and (>= c 54) (<= c 57))) (tset 4 1))
+      ((and (digit? c) (= (tok-unit? page a b) 1)) (set-size (parse-len page a b)))
+      (true (set-size-kw page a b)))))
+
+;; font: [style] [weight] size[/line-height] family
+(defn font-short [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (loop [k vs]
+    (let [a (skip-ws page k ve)]
+      (if (>= a ve)
+        0
+        (let [b (tok-end page a ve)
+              st (font-tok page a b)]
+          (recur b))))))
+
+(defn set-boxsizing [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (xset (slot-get 31) 8 (if (= (has-tok page vs ve "border-box") 1) 1 0)))
+
+(defn set-textxf [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (let [d (slot-get 31)]
+    (cond
+      ((= (has-tok page vs ve "uppercase") 1) (xset d 7 1))
+      ((= (has-tok page vs ve "lowercase") 1) (xset d 7 2))
+      ((= (has-tok page vs ve "capitalize") 1) (xset d 7 3))
+      ((= (has-tok page vs ve "none") 1) (xset d 7 0))
+      (true 0))))
+
+;; border-left: a bar down the left edge only
+(defn set-border-left [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (let [n (parse-lens page vs ve)
+        w (if (> n 0) (slot-get 604) 1)
+        c (first-color page vs ve)
+        none (has-tok page vs ve "none")]
+    (do (tset 8 (if (= none 1) 0 w))
+        (tset 9 (if (>= c 0) c 8421504))
+        (tset 22 1)
+        0)))
+
+(defn set-border-color [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (let [c (first-color page vs ve)]
+    (if (>= c 0) (tset 9 c) 0)))
+
+(defn set-border-width [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (let [n (parse-lens page vs ve)]
+    (if (> n 0) (tset 8 (slot-get 604)) 0)))
+
+(defn set-border-style [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (cond
+    ((= (has-tok page vs ve "none") 1) (tset 8 0))
+    ((= (has-tok page vs ve "hidden") 1) (tset 8 0))
+    ((= (tget 8) 0) (tset 8 1))
+    (true 0)))
+
+
 (defn apply-prop [(page : String @ Region) (ns : I32) (ne : I32) (vs : I32) (ve : I32)] : I32
   (cond
     ((= (word-eq page ns ne "color") 1) (set-fg (parse-color page vs ve)))
     ((= (word-eq page ns ne "background-color") 1) (set-bg (parse-color page vs ve)))
     ((= (word-eq page ns ne "background") 1) (set-bg (first-color page vs ve)))
-    ((= (word-eq page ns ne "font-size") 1) (set-size (parse-len page vs ve)))
+    ((= (word-eq page ns ne "font-size") 1) (font-size-set page vs ve))
+    ((= (word-eq page ns ne "font") 1) (font-short page vs ve))
+    ((= (word-eq page ns ne "background-image") 1) (set-bg (first-color page vs ve)))
+    ((= (word-eq page ns ne "border-left") 1) (set-border-left page vs ve))
+    ((= (word-eq page ns ne "border-color") 1) (set-border-color page vs ve))
+    ((= (word-eq page ns ne "border-width") 1) (set-border-width page vs ve))
+    ((= (word-eq page ns ne "border-style") 1) (set-border-style page vs ve))
+    ((= (word-eq page ns ne "box-sizing") 1) (set-boxsizing page vs ve))
+    ((= (word-eq page ns ne "text-transform") 1) (set-textxf page vs ve))
     ((= (word-eq page ns ne "font-weight") 1) (set-weight page vs ve))
     ((= (word-eq page ns ne "display") 1) (set-display page vs ve))
     ((= (word-eq page ns ne "margin") 1) (box-lens page vs ve 12))
@@ -967,24 +1479,159 @@
     ((= (word-eq page ns ne "max-width") 1) (set-width page vs ve 1))
     (true 0)))
 
-;; name: value; name: value ... in page[ds,de)
-(defn apply-decls [(page : String @ Region) (ds : I32) (de : I32)] : I32
+;; ---- declarations: `name: value; ...` (CSS3 pass: !important, var(), custom properties) ----
+;; index of the ';' that ends the declaration starting at i (parentheses and quotes respected), or e
+(defn decl-end [(t : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [k i depth 0 q 0]
+    (if (>= k e)
+      e
+      (let [c (string/char-at t k)]
+        (cond
+          ((> q 0) (if (= c q) (recur (+ k 1) depth 0) (recur (+ k 1) depth q)))
+          ((or (= c 34) (= c 39)) (recur (+ k 1) depth c))
+          ((= c 40) (recur (+ k 1) (+ depth 1) 0))
+          ((= c 41) (recur (+ k 1) (if (> depth 0) (- depth 1) 0) 0))
+          ((and (= c 59) (= depth 0)) k)
+          (true (recur (+ k 1) depth 0)))))))
+
+;; index of the ')' that closes a '(' already consumed (i is just past it), or e
+(defn paren-close [(t : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [k i depth 1]
+    (if (>= k e)
+      e
+      (let [c (string/char-at t k)]
+        (cond
+          ((= c 40) (recur (+ k 1) (+ depth 1)))
+          ((= c 41) (if (<= depth 1) k (recur (+ k 1) (- depth 1))))
+          (true (recur (+ k 1) depth)))))))
+
+;; index of the '!' of a trailing "!important" in t[vs,ve), else -1
+(defn imp-pos [(t : String @ Region) (vs : I32) (ve : I32)] : I32
+  (let [e (trim-end t vs ve)]
+    (if (< (- e vs) 10)
+      -1
+      (if (= (word-eq t (- e 9) e "important") 1)
+        (let [b (trim-end t vs (- e 9))]
+          (if (and (> b vs) (= (string/char-at t (- b 1)) 33)) (- b 1) -1))
+        -1))))
+
+;; custom properties (--name): one document-wide table (the :root approximation), slots 1750+4k, k < 48:
+;; name hash, source (0 page / 1 css store), value start, value end; count in slot 1740
+(defn var-find [(h : I32)] : I32
+  (loop [k 0]
+    (if (>= k (slot-get 1740))
+      -1
+      (if (= (slot-get (+ 1750 (* k 4))) h) k (recur (+ k 1))))))
+
+(defn var-store [(k : I32) (h : I32) (src : I32) (vs : I32) (ve : I32)] : I32
+  (let [b (+ 1750 (* k 4))]
+    (do (slot-set b h) (slot-set (+ b 1) src) (slot-set (+ b 2) vs) (slot-set (+ b 3) ve) 0)))
+
+(defn var-put [(h : I32) (src : I32) (vs : I32) (ve : I32)] : I32
+  (let [f (var-find h)]
+    (cond
+      ((>= f 0) (var-store f h src vs ve))
+      ((< (slot-get 1740) 48) (do (var-store (slot-get 1740) h src vs ve) (slot-set 1740 (+ (slot-get 1740) 1)) 0))
+      (true 0))))
+
+(defn collect-vars [(t : String @ Region) (src : I32) (ds : I32) (de : I32)] : I32
   (loop [i ds]
-    (let [a (skip-ws page i de)]
+    (let [a (skip-ws t i de)]
       (if (>= a de)
         0
-        (let [colon (find-in page 58 a de)]
+        (let [colon (find-in t 58 a de)]
           (if (< colon 0)
             0
-            (let [semi0 (find-in page 59 colon de)
-                  semi (if (< semi0 0) de semi0)
-                  ne (trim-end page a colon)
-                  vs (skip-ws page (+ colon 1) semi)
-                  ve (trim-end page vs semi)
-                  p (apply-prop page a ne vs ve)]
+            (let [semi (decl-end t colon de)
+                  ne (trim-end t a colon)
+                  vs (skip-ws t (+ colon 1) semi)
+                  ve (trim-end t vs semi)
+                  isv (if (and (>= (- ne a) 3) (and (= (string/char-at t a) 45) (= (string/char-at t (+ a 1)) 45))) 1 0)
+                  p (if (= isv 1) (var-put (hash-range t a ne) src vs ve) 0)]
               (recur (+ semi 1)))))))))
 
-;; ---- stylesheet scanning: <style> blocks -> rule table (selector kinds: tag .class #id *) ----
+;; index of "var(" in t[s,e), else -1
+(defn find-var [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (loop [k s]
+    (if (> (+ k 4) e)
+      -1
+      (if (= (has-at t k e "var(") 1) k (recur (+ k 1))))))
+
+;; the value stored for custom property entry k, itself expanded (var() inside a value)
+(defn var-value [(page : String @ Region) (k : I32) (depth : I32) (dest : Arena @ Region)] : String
+  (let [b (+ 1750 (* k 4))
+        src (if (= (slot-get (+ b 1)) 1) (css-buf) page)]
+    (expand-vars src page (slot-get (+ b 2)) (slot-get (+ b 3)) (+ depth 1) dest)))
+
+;; the text a var( ... ) call at t[as,ae) stands for: the custom property's value, else its fallback, else ""
+(defn var-text [(t : String @ Region) (page : String @ Region) (as : I32) (ae : I32) (depth : I32)
+                (dest : Arena @ Region)] : String
+  (let [cm (find-in t 44 as ae)
+        ne (trim-end t as (if (< cm 0) ae cm))
+        k (if (< depth 4) (var-find (hash-range t (skip-ws t as ae) ne)) -1)]
+    (cond
+      ((>= k 0) (var-value page k depth dest))
+      ((and (>= cm 0) (< depth 4))
+       (expand-vars t page (skip-ws t (+ cm 1) ae) (trim-end t (+ cm 1) ae) (+ depth 1) dest))
+      (true ""))))
+
+;; t[vs,ve) with every var(--x[, fallback]) replaced
+(defn expand-vars [(t : String @ Region) (page : String @ Region) (vs : I32) (ve : I32) (depth : I32)
+                   (dest : Arena @ Region)] : String
+  (let [k (find-var t vs ve)]
+    (if (< k 0)
+      (string/substring t vs ve dest)
+      (let [close (paren-close t (+ k 4) ve)
+            pre (string/substring t vs k dest)
+            rep (var-text t page (+ k 4) close depth dest)
+            after (expand-vars t page (+ close 1) ve depth dest)]
+        (string/concat (string/concat pre rep dest) after dest)))))
+
+(defn decl-var-run [(t : String @ Region) (page : String @ Region) (a : I32) (ne : I32) (vs : I32) (ve : I32)
+                    (dest : Arena @ Region)] : I32
+  (let [nm (string/substring t a ne dest)
+        vv (expand-vars t page vs ve 0 dest)
+        s (string/concat (string/concat nm ":" dest) vv dest)
+        nl (string/length nm)]
+    (apply-prop s 0 nl (+ nl 1) (string/length s))))
+
+(defn decl-var [(t : String @ Region) (page : String @ Region) (a : I32) (ne : I32) (vs : I32) (ve : I32)] : I32
+  (if (= (word-eq t a ne "display") 1)
+    0
+    (with-arena [fr :region/scratch 4096]
+      (decl-var-run t page a ne vs ve &mut fr))))
+
+(defn decl-apply [(t : String @ Region) (page : String @ Region) (a : I32) (ne : I32) (vs : I32) (ve : I32)] : I32
+  (if (>= (find-var t vs ve) 0)
+    (decl-var t page a ne vs ve)
+    (apply-prop t a ne vs ve)))
+
+;; name: value; name: value ... in t[ds,de); mode 0 applies the normal declarations, mode 1 only the !important ones
+(defn apply-decls [(t : String @ Region) (page : String @ Region) (ds : I32) (de : I32) (mode : I32)] : I32
+  (loop [i ds]
+    (let [a (skip-ws t i de)]
+      (if (>= a de)
+        0
+        (let [colon (find-in t 58 a de)]
+          (if (< colon 0)
+            0
+            (let [semi (decl-end t colon de)
+                  ne (trim-end t a colon)
+                  vs (skip-ws t (+ colon 1) semi)
+                  ve0 (trim-end t vs semi)
+                  ip (imp-pos t vs ve0)
+                  ve (if (>= ip 0) (trim-end t vs ip) ve0)
+                  want (if (>= ip 0) 1 0)
+                  p (if (= want mode) (decl-apply t page a ne vs ve) 0)]
+              (recur (+ semi 1)))))))))
+
+
+;; ---- stylesheet scanning (CSS3): <style> blocks, <link rel=stylesheet>, @import, @media -> rule table ----
+;; Rule k at 2100+6k (k < 160), kept sorted by specificity (stable: source order breaks ties):
+;;   +0 source (0 page / 1 css store), +1 selector start, +2 selector end, +3 declarations start, +4 end, +5 specificity.
+;; Selectors are matched at apply time, right to left, against the style stack plus the ancestor table (xget):
+;; tag, *, .class, #id, [attr] [attr=v] ^= $= *= ~= |=, :first-child :nth-child() :not() :is() :where() :root
+;; :link :checked :disabled, and the descendant / child (>) combinators. Everything else simply never matches.
 (defn comment-end [(page : String @ Region) (k : I32) (e : I32)] : I32
   (loop [m k]
     (if (>= (+ m 1) e)
@@ -1014,64 +1661,636 @@
           ((= c 125) (if (<= depth 1) (+ k 1) (recur (+ k 1) (- depth 1))))
           (true (recur (+ k 1) depth)))))))
 
-(defn ident? [(page : String @ Region) (s : I32) (e : I32)] : I32
+;; end of an identifier run
+(defn id-end [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (loop [k s]
+    (if (>= k e)
+      e
+      (let [c (string/char-at t k)]
+        (if (or (letter? c) (or (digit? c) (or (= c 45) (= c 95))))
+          (recur (+ k 1))
+          k)))))
+
+;; ancestor table: entry d at 1500+10d (d < 12): +0 id hash (-2 none), +1/+2 class value range in the page (-1 none),
+;; +3 children opened so far, +4 own index among its siblings (1 based), +5 tag-name end, +6 tag end ('>'),
+;; +7 text-transform (0 none 1 upper 2 lower 3 capitalize; inherited), +8 box-sizing border-box
+(defn xget [(d : I32) (f : I32)] : I32
+  (slot-get (+ 1500 (+ (* d 10) f))))
+
+(defn xset [(d : I32) (f : I32) (v : I32)] : I32
+  (slot-set (+ 1500 (+ (* d 10) f)) v))
+
+;; ']' closing the '[' whose content starts at i (quotes respected), or e
+(defn bracket-close [(t : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [k i q 0]
+    (if (>= k e)
+      e
+      (let [c (string/char-at t k)]
+        (cond
+          ((> q 0) (if (= c q) (recur (+ k 1) 0) (recur (+ k 1) q)))
+          ((or (= c 34) (= c 39)) (recur (+ k 1) c))
+          ((= c 93) k)
+          (true (recur (+ k 1) 0)))))))
+
+;; closing quote q at/after i within e, else e
+(defn quote-close [(t : String @ Region) (i : I32) (q : I32) (e : I32)] : I32
+  (loop [k i]
+    (if (>= k e)
+      e
+      (if (= (string/char-at t k) q) k (recur (+ k 1))))))
+
+;; case-insensitive equality of t[a,b) and p[c,d)
+(defn rng-ieq [(t : String @ Region) (a : I32) (b : I32) (p : String @ Region) (c : I32) (d : I32)] : I32
+  (if (= (- b a) (- d c))
+    (loop [k 0]
+      (if (>= k (- b a))
+        1
+        (if (= (lc (string/char-at t (+ a k))) (lc (string/char-at p (+ c k))))
+          (recur (+ k 1))
+          0)))
+    0))
+
+;; exact equality
+(defn rng-eq [(t : String @ Region) (a : I32) (b : I32) (p : String @ Region) (c : I32) (d : I32)] : I32
+  (if (= (- b a) (- d c))
+    (loop [k 0]
+      (if (>= k (- b a))
+        1
+        (if (= (string/char-at t (+ a k)) (string/char-at p (+ c k)))
+          (recur (+ k 1))
+          0)))
+    0))
+
+(defn attr-name-end [(p : String @ Region) (a : I32) (te : I32)] : I32
+  (loop [k a]
+    (if (>= k te)
+      te
+      (let [c (string/char-at p k)]
+        (if (or (ws? c) (or (= c 61) (or (= c 47) (= c 62)))) k (recur (+ k 1)))))))
+
+(defn unq-end [(p : String @ Region) (a : I32) (te : I32)] : I32
+  (loop [k a]
+    (if (>= k te)
+      te
+      (let [c (string/char-at p k)]
+        (if (or (ws? c) (= c 62)) k (recur (+ k 1)))))))
+
+;; the attribute t[na,nb) among page[k0,te): 1 when present (value range -> slots 1648/1649), else 0
+(defn attr-scan [(t : String @ Region) (na : I32) (nb : I32) (p : String @ Region) (k0 : I32) (te : I32)] : I32
+  (loop [k k0]
+    (let [a (skip-ws p k te)]
+      (if (or (>= a te) (or (= (string/char-at p a) 47) (= (string/char-at p a) 62)))
+        0
+        (let [ae (attr-name-end p a te)
+              q (skip-ws p ae te)
+              hasv (if (and (< q te) (= (string/char-at p q) 61)) 1 0)
+              hit (rng-ieq t na nb p a ae)
+              v0 (if (= hasv 1) (skip-ws p (+ q 1) te) ae)
+              qc (if (= hasv 1) (string/char-at p v0) 0)
+              quoted (if (or (= qc 34) (= qc 39)) 1 0)
+              vs (if (= quoted 1) (+ v0 1) v0)
+              ve (if (= hasv 0) ae (if (= quoted 1) (quote-close p vs qc te) (unq-end p vs te)))
+              nxt (if (= quoted 1) (+ ve 1) (if (> ve a) ve (+ a 1)))]
+          (if (= hit 1)
+            (do (slot-set 1648 vs) (slot-set 1649 ve) 1)
+            (recur nxt)))))))
+
+(defn attr-lookup [(t : String @ Region) (na : I32) (nb : I32) (p : String @ Region) (d : I32)] : I32
+  (if (< (xget d 6) 0)
+    0
+    (attr-scan t na nb p (xget d 5) (xget d 6))))
+
+(defn s-starts [(t : String @ Region) (xs : I32) (xe : I32) (p : String @ Region) (ps : I32) (pe : I32)] : I32
+  (if (<= (- xe xs) (- pe ps))
+    (rng-eq t xs xe p ps (+ ps (- xe xs)))
+    0))
+
+(defn s-ends [(t : String @ Region) (xs : I32) (xe : I32) (p : String @ Region) (ps : I32) (pe : I32)] : I32
+  (if (<= (- xe xs) (- pe ps))
+    (rng-eq t xs xe p (- pe (- xe xs)) pe)
+    0))
+
+(defn s-contains [(t : String @ Region) (xs : I32) (xe : I32) (p : String @ Region) (ps : I32) (pe : I32)] : I32
+  (if (> (- xe xs) (- pe ps))
+    0
+    (loop [k ps]
+      (if (> (+ k (- xe xs)) pe)
+        0
+        (if (= (rng-eq t xs xe p k (+ k (- xe xs))) 1) 1 (recur (+ k 1)))))))
+
+;; a whitespace-separated word of p[ps,pe) equals t[xs,xe)
+(defn s-word [(t : String @ Region) (xs : I32) (xe : I32) (p : String @ Region) (ps : I32) (pe : I32)] : I32
+  (loop [k ps]
+    (let [a (skip-ws p k pe)]
+      (if (>= a pe)
+        0
+        (let [b (tok-end p a pe)]
+          (if (= (rng-eq t xs xe p a b) 1) 1 (recur b)))))))
+
+(defn s-dash [(t : String @ Region) (xs : I32) (xe : I32) (p : String @ Region) (ps : I32) (pe : I32)] : I32
+  (if (= (rng-eq t xs xe p ps pe) 1)
+    1
+    (if (and (> (- pe ps) (- xe xs)) (= (s-starts t xs xe p ps pe) 1))
+      (if (= (string/char-at p (+ ps (- xe xs))) 45) 1 0)
+      0)))
+
+(defn attr-op [(t : String @ Region) (op : I32) (xs : I32) (xe : I32) (p : String @ Region)] : I32
+  (let [ps (slot-get 1648)
+        pe (slot-get 1649)]
+    (cond
+      ((= (- xe xs) 0) 0)
+      ((= op 61) (rng-eq t xs xe p ps pe))
+      ((= op 94) (s-starts t xs xe p ps pe))
+      ((= op 36) (s-ends t xs xe p ps pe))
+      ((= op 42) (s-contains t xs xe p ps pe))
+      ((= op 126) (s-word t xs xe p ps pe))
+      ((= op 124) (s-dash t xs xe p ps pe))
+      (true 0))))
+
+;; first of = ~ | ^ $ * in t[a,q), else q
+(defn attr-sel-end [(t : String @ Region) (a : I32) (q : I32)] : I32
+  (loop [k a]
+    (if (>= k q)
+      q
+      (let [c (string/char-at t k)]
+        (if (or (= c 61) (or (= c 126) (or (= c 124) (or (= c 94) (or (= c 36) (= c 42))))))
+          k
+          (recur (+ k 1)))))))
+
+(defn attr-cmp [(t : String @ Region) (p : String @ Region) (ne : I32) (q : I32)] : I32
+  (let [c (string/char-at t ne)
+        v0 (skip-ws t (if (= c 61) (+ ne 1) (+ ne 2)) q)
+        qc (string/char-at t v0)
+        quoted (if (or (= qc 34) (= qc 39)) 1 0)
+        xs (if (= quoted 1) (+ v0 1) v0)
+        xe (if (= quoted 1) (quote-close t xs qc q) (trim-end t xs q))]
+    (attr-op t c xs xe p)))
+
+;; [name], [name=v], [name^=v] ... with t[a,q) the text between the brackets
+(defn attr-match [(t : String @ Region) (p : String @ Region) (a : I32) (q : I32) (d : I32)] : I32
+  (let [ne (attr-sel-end t a q)
+        nm (trim-end t a ne)
+        found (attr-lookup t a nm p d)]
+    (cond
+      ((= found 0) 0)
+      ((>= ne q) 1)
+      (true (attr-cmp t p ne q)))))
+
+;; an+b / odd / even / N against a 1-based index
+(defn nth-num [(t : String @ Region) (s : I32) (e : I32)] : I32
   (if (>= s e)
     0
-    (loop [k s]
-      (if (>= k e)
-        1
-        (let [c (string/char-at page k)]
-          (if (or (letter? c) (digit? c) (= c 45) (= c 95))
-            (recur (+ k 1))
-            0))))))
+    (let [neg (if (= (string/char-at t s) 45) 1 0)
+          st (if (or (= (string/char-at t s) 45) (= (string/char-at t s) 43)) (+ s 1) s)
+          v (scan-int t st e)]
+      (if (= neg 1) (- 0 v) v))))
 
-(defn add-rule [(page : String @ Region) (s : I32) (e : I32) (ds : I32) (de : I32)] : I32
-  (let [n (slot-get 30)
-        c (string/char-at page s)
-        kind (cond
-               ((= c 46) (if (= (ident? page (+ s 1) e) 1) 2 0))
-               ((= c 35) (if (= (ident? page (+ s 1) e) 1) 3 0))
-               ((and (= c 42) (= (- e s) 1)) 5)
-               ((= (ident? page s e) 1) 1)
-               (true 0))
-        hs (if (or (= kind 2) (= kind 3)) (+ s 1) s)]
-    (if (or (= kind 0) (>= n 64))
+(defn nth-ab [(t : String @ Region) (s : I32) (e : I32) (n : I32) (idx : I32)] : I32
+  (let [a0 (skip-ws t s n)
+        ae (trim-end t a0 n)
+        a (if (>= a0 ae) 1 (if (and (= (- ae a0) 1) (= (string/char-at t a0) 45)) -1 (if (and (= (- ae a0) 1) (= (string/char-at t a0) 43)) 1 (nth-num t a0 ae))))
+        bs (skip-ws t (+ n 1) e)
+        b (nth-num t bs (trim-end t bs e))
+        diff (- idx b)]
+    (cond
+      ((= a 0) (if (= idx b) 1 0))
+      ((> a 0) (if (and (>= diff 0) (= (mod diff a) 0)) 1 0))
+      (true (if (and (<= diff 0) (= (mod (- 0 diff) (- 0 a)) 0)) 1 0)))))
+
+(defn nth-test [(t : String @ Region) (s0 : I32) (e0 : I32) (idx : I32)] : I32
+  (let [s (skip-ws t s0 e0)
+        e (trim-end t s e0)
+        n (find-in t 110 s e)]
+    (cond
+      ((>= s e) 0)
+      ((= (word-eq t s e "odd") 1) (if (= (mod idx 2) 1) 1 0))
+      ((= (word-eq t s e "even") 1) (if (= (mod idx 2) 0) 1 0))
+      ((< n 0) (if (= (nth-num t s e) idx) 1 0))
+      (true (nth-ab t s e n idx)))))
+
+(defn cls-hit [(t : String @ Region) (p : String @ Region) (s : I32) (e : I32) (d : I32)] : I32
+  (if (or (>= s e) (< (xget d 1) 0))
+    0
+    (class-has? p (xget d 1) (xget d 2) (hash-range t s e))))
+
+(defn comma-top [(t : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [k i depth 0]
+    (if (>= k e)
+      e
+      (let [c (string/char-at t k)]
+        (cond
+          ((or (= c 40) (= c 91)) (recur (+ k 1) (+ depth 1)))
+          ((or (= c 41) (= c 93)) (recur (+ k 1) (if (> depth 0) (- depth 1) 0)))
+          ((and (= c 44) (= depth 0)) k)
+          (true (recur (+ k 1) depth)))))))
+
+;; any comma-separated compound selector of t[s,e) matches the element at depth d
+(defn list-any [(t : String @ Region) (p : String @ Region) (s : I32) (e : I32) (d : I32)] : I32
+  (loop [k s]
+    (if (>= k e)
       0
-      (let [b (+ 40 (* n 4))]
-        (do (slot-set b kind)
-            (slot-set (+ b 1) (hash-range page hs e))
-            (slot-set (+ b 2) ds)
-            (slot-set (+ b 3) de)
+      (let [c (comma-top t k e)
+            a (skip-ws t k c)
+            b (trim-end t a c)]
+        (if (and (< a b) (= (cmp-step t p a b d) 1))
+          1
+          (recur (+ c 1)))))))
+
+(defn pseudo-test [(t : String @ Region) (p : String @ Region) (ps : I32) (pe : I32) (as : I32) (ae : I32) (d : I32)] : I32
+  (cond
+    ((= (word-eq t ps pe "first-child") 1) (if (= (xget d 4) 1) 1 0))
+    ((= (word-eq t ps pe "nth-child") 1) (nth-test t as ae (xget d 4)))
+    ((= (word-eq t ps pe "root") 1) (if (= d 1) 1 0))
+    ((= (word-eq t ps pe "not") 1) (- 1 (list-any t p as ae d)))
+    ((= (word-eq t ps pe "is") 1) (list-any t p as ae d))
+    ((= (word-eq t ps pe "where") 1) (list-any t p as ae d))
+    ((= (word-eq t ps pe "link") 1) (attr-lookup "href" 0 4 p d))
+    ((= (word-eq t ps pe "any-link") 1) (attr-lookup "href" 0 4 p d))
+    ((= (word-eq t ps pe "checked") 1) (attr-lookup "checked" 0 7 p d))
+    ((= (word-eq t ps pe "disabled") 1) (attr-lookup "disabled" 0 8 p d))
+    ((= (word-eq t ps pe "enabled") 1) (- 1 (attr-lookup "disabled" 0 8 p d)))
+    (true 0)))
+
+(defn cmp-class [(t : String @ Region) (p : String @ Region) (k : I32) (b : I32) (d : I32)] : I32
+  (let [ne (id-end t (+ k 1) b)]
+    (if (= (cls-hit t p (+ k 1) ne d) 1) (cmp-step t p ne b d) 0)))
+
+(defn cmp-id [(t : String @ Region) (p : String @ Region) (k : I32) (b : I32) (d : I32)] : I32
+  (let [ne (id-end t (+ k 1) b)]
+    (if (and (> ne (+ k 1)) (= (hash-range t (+ k 1) ne) (xget d 0))) (cmp-step t p ne b d) 0)))
+
+(defn cmp-tag [(t : String @ Region) (p : String @ Region) (k : I32) (b : I32) (d : I32)] : I32
+  (let [ne (id-end t k b)]
+    (if (and (> ne k) (= (hash-range t k ne) (eget d 0))) (cmp-step t p ne b d) 0)))
+
+(defn cmp-attr [(t : String @ Region) (p : String @ Region) (k : I32) (b : I32) (d : I32)] : I32
+  (let [q (bracket-close t (+ k 1) b)]
+    (if (and (< q b) (= (attr-match t p (+ k 1) q d) 1)) (cmp-step t p (+ q 1) b d) 0)))
+
+(defn cmp-pseudo-go [(t : String @ Region) (p : String @ Region) (k : I32) (ne : I32) (b : I32) (d : I32)] : I32
+  (if (and (< ne b) (= (string/char-at t ne) 40))
+    (let [q (paren-close t (+ ne 1) b)]
+      (if (= (pseudo-test t p (+ k 1) ne (+ ne 1) q d) 1) (cmp-step t p (+ q 1) b d) 0))
+    (if (= (pseudo-test t p (+ k 1) ne ne ne d) 1) (cmp-step t p ne b d) 0)))
+
+(defn cmp-pseudo [(t : String @ Region) (p : String @ Region) (k : I32) (b : I32) (d : I32)] : I32
+  (if (= (string/char-at t (+ k 1)) 58)
+    0
+    (cmp-pseudo-go t p k (id-end t (+ k 1) b) b d)))
+
+;; the compound selector t[k,b) against the element at depth d, from position k on
+(defn cmp-step [(t : String @ Region) (p : String @ Region) (k : I32) (b : I32) (d : I32)] : I32
+  (if (>= k b)
+    1
+    (let [c (string/char-at t k)]
+      (cond
+        ((= c 42) (cmp-step t p (+ k 1) b d))
+        ((= c 46) (cmp-class t p k b d))
+        ((= c 35) (cmp-id t p k b d))
+        ((= c 91) (cmp-attr t p k b d))
+        ((= c 58) (cmp-pseudo t p k b d))
+        (true (cmp-tag t p k b d))))))
+
+;; start of the last compound selector of t[s,e): scanning back to whitespace / '>' / '+' / '~' outside [] and ()
+(defn compound-start [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (loop [k e depth 0]
+    (if (<= k s)
+      s
+      (let [c (string/char-at t (- k 1))]
+        (cond
+          ((or (= c 93) (= c 41)) (recur (- k 1) (+ depth 1)))
+          ((or (= c 91) (= c 40)) (recur (- k 1) (if (> depth 0) (- depth 1) 0)))
+          ((and (= depth 0) (or (ws? c) (or (= c 62) (or (= c 43) (= c 126))))) k)
+          (true (recur (- k 1) depth)))))))
+
+(defn sel-match [(t : String @ Region) (p : String @ Region) (s : I32) (e : I32) (d : I32)] : I32
+  (let [e2 (trim-end t s e)]
+    (if (or (>= s e2) (< d 1))
+      0
+      (let [cs (compound-start t s e2)]
+        (if (= (cmp-step t p cs e2 d) 0)
+          0
+          (sel-left t p s cs d))))))
+
+;; the selector part before the compound that just matched: descendant / child combinators
+(defn sel-left [(t : String @ Region) (p : String @ Region) (s : I32) (cs : I32) (d : I32)] : I32
+  (let [q (trim-end t s cs)]
+    (if (<= q s)
+      1
+      (let [c (string/char-at t (- q 1))]
+        (cond
+          ((= c 62) (sel-match t p s (- q 1) (- d 1)))
+          ((or (= c 43) (= c 126)) 0)
+          (true (sel-any-ancestor t p s q (- d 1))))))))
+
+(defn sel-any-ancestor [(t : String @ Region) (p : String @ Region) (s : I32) (q : I32) (a : I32)] : I32
+  (loop [k a]
+    (if (< k 1)
+      0
+      (if (= (sel-match t p s q k) 1) 1 (recur (- k 1))))))
+
+;; specificity: ids * 10000 + (classes, attributes, pseudo-classes) * 100 + tags
+(defn sel-spec [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (loop [k s sp 0 prev 32]
+    (if (>= k e)
+      sp
+      (let [c (string/char-at t k)]
+        (cond
+          ((= c 35) (recur (+ k 1) (+ sp 10000) c))
+          ((= c 46) (recur (+ k 1) (+ sp 100) c))
+          ((= c 91) (recur (+ (bracket-close t (+ k 1) e) 1) (+ sp 100) 93))
+          ((= c 58) (if (= (string/char-at t (+ k 1)) 58)
+                      (recur (+ k 2) (+ sp 1) 58)
+                      (recur (+ k 1) (+ sp 100) 58)))
+          ((and (letter? c) (or (ws? prev) (= prev 62))) (recur (id-end t k e) (+ sp 1) 97))
+          (true (recur (+ k 1) sp c)))))))
+
+;; a selector this engine can ever match: no sibling combinators outside brackets, no pseudo-elements
+(defn sel-ok? [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (loop [k s depth 0]
+    (if (>= k e)
+      1
+      (let [c (string/char-at t k)]
+        (cond
+          ((or (= c 91) (= c 40)) (recur (+ k 1) (+ depth 1)))
+          ((or (= c 93) (= c 41)) (recur (+ k 1) (if (> depth 0) (- depth 1) 0)))
+          ((and (= depth 0) (or (= c 43) (= c 126))) 0)
+          ((and (= c 58) (= (string/char-at t (+ k 1)) 58)) 0)
+          (true (recur (+ k 1) depth)))))))
+
+(defn rule-pos [(sp : I32) (n : I32)] : I32
+  (loop [k 0]
+    (if (>= k n)
+      n
+      (if (> (slot-get (+ 2105 (* k 6))) sp) k (recur (+ k 1))))))
+
+(defn rule-shift [(pos : I32) (n : I32)] : I32
+  (loop [k (- n 1)]
+    (if (< k pos)
+      0
+      (let [a (+ 2100 (* k 6))
+            b (+ a 6)]
+        (do (slot-set b (slot-get a)) (slot-set (+ b 1) (slot-get (+ a 1))) (slot-set (+ b 2) (slot-get (+ a 2)))
+            (slot-set (+ b 3) (slot-get (+ a 3))) (slot-set (+ b 4) (slot-get (+ a 4))) (slot-set (+ b 5) (slot-get (+ a 5)))
+            (recur (- k 1)))))))
+
+(defn add-rule [(t : String @ Region) (src : I32) (s : I32) (e : I32) (ds : I32) (de : I32)] : I32
+  (let [n (slot-get 30)]
+    (if (or (>= s e) (or (>= n 160) (= (sel-ok? t s e) 0)))
+      0
+      (let [sp (sel-spec t s e)
+            pos (rule-pos sp n)
+            sh (rule-shift pos n)
+            b (+ 2100 (* pos 6))]
+        (do (slot-set b src) (slot-set (+ b 1) s) (slot-set (+ b 2) e) (slot-set (+ b 3) ds) (slot-set (+ b 4) de)
+            (slot-set (+ b 5) sp)
             (slot-set 30 (+ n 1))
             0)))))
 
-;; a comma-separated selector list page[a,b) sharing the declaration block page[ds,de)
-(defn add-selectors [(page : String @ Region) (a : I32) (b : I32) (ds : I32) (de : I32)] : I32
+;; a comma-separated selector list t[a,b) sharing the declaration block t[ds,de)
+(defn add-selectors [(t : String @ Region) (src : I32) (a : I32) (b : I32) (ds : I32) (de : I32)] : I32
   (loop [k a]
     (if (>= k b)
       0
-      (let [c0 (find-in page 44 k b)
-            c (if (< c0 0) b c0)
-            s (skip-ws page k c)
-            e (trim-end page s c)
-            r (if (< s e) (add-rule page s e ds de) 0)]
+      (let [c (comma-top t k b)
+            s (skip-ws t k c)
+            e (trim-end t s c)
+            r (if (< s e) (add-rule t src s e ds de) 0)]
         (recur (+ c 1))))))
 
-(defn parse-css [(page : String @ Region) (s : I32) (e : I32)] : I32
-  (loop [i s]
-    (let [a (css-skip page i e)]
+;; ---- media queries: viewport width/height are slots 1646/1647 ----
+(defn mq-len [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (parse-len t s e))
+
+(defn mq-cmp [(have : I32) (op : I32) (want : I32)] : I32
+  (cond
+    ((< want 0) 0)
+    ((= op 1) (if (>= have want) 1 0))
+    ((= op 2) (if (<= have want) 1 0))
+    ((= op 3) (if (> have want) 1 0))
+    ((= op 4) (if (< have want) 1 0))
+    (true (if (= have want) 1 0))))
+
+;; (feature: value) with t[s,e) the text between the parentheses
+(defn mq-feature [(t : String @ Region) (s : I32) (e : I32) (colon : I32)] : I32
+  (let [ne (trim-end t s colon)
+        vs (skip-ws t (+ colon 1) e)
+        ve (trim-end t vs e)]
+    (cond
+      ((= (word-eq t s ne "min-width") 1) (mq-cmp (slot-get 1646) 1 (mq-len t vs ve)))
+      ((= (word-eq t s ne "max-width") 1) (mq-cmp (slot-get 1646) 2 (mq-len t vs ve)))
+      ((= (word-eq t s ne "min-height") 1) (mq-cmp (slot-get 1647) 1 (mq-len t vs ve)))
+      ((= (word-eq t s ne "max-height") 1) (mq-cmp (slot-get 1647) 2 (mq-len t vs ve)))
+      ((= (word-eq t s ne "width") 1) (mq-cmp (slot-get 1646) 0 (mq-len t vs ve)))
+      ((= (word-eq t s ne "height") 1) (mq-cmp (slot-get 1647) 0 (mq-len t vs ve)))
+      ((= (word-eq t s ne "orientation") 1) (if (= (word-eq t vs ve "landscape") 1) 1 0))
+      ((= (word-eq t s ne "prefers-color-scheme") 1) (if (= (word-eq t vs ve "dark") 1) 1 0))
+      ((= (word-eq t s ne "hover") 1) (if (= (word-eq t vs ve "hover") 1) 1 0))
+      ((= (word-eq t s ne "any-hover") 1) (if (= (word-eq t vs ve "hover") 1) 1 0))
+      ((= (word-eq t s ne "pointer") 1) (if (= (word-eq t vs ve "fine") 1) 1 0))
+      ((= (word-eq t s ne "prefers-reduced-motion") 1) (if (= (word-eq t vs ve "reduce") 1) 1 0))
+      ((= (word-eq t s ne "color") 1) 1)
+      (true 0))))
+
+;; range syntax: (width >= 600px) (height < 400px)
+(defn mq-range [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (let [g (find-in t 62 s e)
+        l (find-in t 60 s e)
+        at (if (>= g 0) g l)]
+    (if (< at 0)
+      0
+      (let [ge (if (>= g 0) 1 0)
+            eq (if (= (string/char-at t (+ at 1)) 61) 1 0)
+            ne (trim-end t s at)
+            vs (skip-ws t (+ at (+ 1 eq)) e)
+            ve (trim-end t vs e)
+            op (if (= ge 1) (if (= eq 1) 1 3) (if (= eq 1) 2 4))]
+        (cond
+          ((= (word-eq t s ne "width") 1) (mq-cmp (slot-get 1646) op (mq-len t vs ve)))
+          ((= (word-eq t s ne "height") 1) (mq-cmp (slot-get 1647) op (mq-len t vs ve)))
+          (true 0))))))
+
+(defn mq-cond [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (let [colon (find-in t 58 s e)]
+    (if (>= colon 0) (mq-feature t (skip-ws t s e) e colon) (mq-range t s e))))
+
+(defn mq-word-end [(t : String @ Region) (a : I32) (e : I32)] : I32
+  (loop [k a]
+    (if (>= k e)
+      e
+      (let [c (string/char-at t k)]
+        (if (or (ws? c) (= c 40)) k (recur (+ k 1)))))))
+
+(defn mq-type-ok [(t : String @ Region) (a : I32) (b : I32)] : I32
+  (cond
+    ((= (word-eq t a b "and") 1) 1)
+    ((= (word-eq t a b "only") 1) 1)
+    ((= (word-eq t a b "all") 1) 1)
+    ((= (word-eq t a b "screen") 1) 1)
+    (true 0)))
+
+;; every part of one media query (a type or a parenthesised feature) holds
+(defn mq-and [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (loop [k s]
+    (let [a (skip-ws t k e)]
       (if (>= a e)
+        1
+        (if (= (string/char-at t a) 40)
+          (let [q (paren-close t (+ a 1) e)]
+            (if (= (mq-cond t (+ a 1) q) 1) (recur (+ q 1)) 0))
+          (let [b (mq-word-end t a e)]
+            (if (= (mq-type-ok t a b) 1) (recur (if (> b a) b (+ a 1))) 0)))))))
+
+(defn mq-eval [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (let [a (skip-ws t s e)
+        neg (if (= (has-at t a e "not ") 1) 1 0)
+        r (mq-and t (if (= neg 1) (+ a 4) a) e)]
+    (if (= neg 1) (- 1 r) r)))
+
+;; a media query list t[s,e): any comma-separated query holding; an empty list holds
+(defn media-match [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (if (>= (skip-ws t s e) e)
+    1
+    (loop [k s]
+      (if (>= k e)
         0
-        (let [b (find-in page 123 a e)]
-          (if (< b 0)
-            0
-            (if (= (string/char-at page a) 64)
-              (recur (skip-block page b e))
-              (let [d (find-in page 125 (+ b 1) e)]
-                (if (< d 0)
-                  0
-                  (let [r (add-selectors page a b (+ b 1) d)]
-                    (recur (+ d 1))))))))))))
+        (let [c (comma-top t k e)]
+          (if (= (mq-eval t k c) 1) 1 (recur (+ c 1))))))))
+
+;; ---- external sheets (<link rel=stylesheet>, @import): table at 3100+10k, k < 16, count in slot 1640 ----
+;; +0 key (tag index / import position), +1 state (0 queued, 1 fetching, 2 loaded, 3 failed), +2/+3 text range in the
+;; css store, +4 parent sheet (-1 the page), +5 kind (0 link, 1 import), +6 url text source (0 page / 1 css store),
+;; +7/+8 url range, +9 hop count
+(defn sh-get [(k : I32) (f : I32)] : I32
+  (slot-get (+ 3100 (+ (* k 10) f))))
+
+(defn sh-set [(k : I32) (f : I32) (v : I32)] : I32
+  (slot-set (+ 3100 (+ (* k 10) f)) v))
+
+(defn sh-find [(key : I32) (kind : I32)] : I32
+  (loop [k 0]
+    (if (>= k (slot-get 1640))
+      -1
+      (if (and (= (sh-get k 0) key) (= (sh-get k 5) kind)) k (recur (+ k 1))))))
+
+(defn sh-new [(key : I32) (kind : I32) (parent : I32) (src : I32) (us : I32) (ue : I32)] : I32
+  (let [k (slot-get 1640)]
+    (if (or (>= k 16) (not (= (slot-get 6) 1)))
+      -1
+      (do (sh-set k 0 key) (sh-set k 1 0) (sh-set k 2 0) (sh-set k 3 0) (sh-set k 4 parent) (sh-set k 5 kind)
+          (sh-set k 6 src) (sh-set k 7 us) (sh-set k 8 ue) (sh-set k 9 0)
+          (slot-set 1640 (+ k 1))
+          k))))
+
+(defn sh-entry [(key : I32) (kind : I32) (parent : I32) (src : I32) (us : I32) (ue : I32)] : I32
+  (let [f (sh-find key kind)]
+    (if (>= f 0) f (sh-new key kind parent src us ue))))
+
+;; the loaded sheet whose css-store text contains pos, else -1
+(defn sh-owner [(pos : I32)] : I32
+  (loop [k 0]
+    (if (>= k (slot-get 1640))
+      -1
+      (if (and (= (sh-get k 1) 2) (and (>= pos (sh-get k 2)) (< pos (sh-get k 3)))) k (recur (+ k 1))))))
+
+;; parse the text of loaded sheet k now (its place in the document order)
+(defn sheet-apply [(k : I32) (depth : I32)] : I32
+  (if (and (>= k 0) (and (= (sh-get k 1) 2) (< depth 3)))
+    (parse-css (css-buf) 1 (sh-get k 2) (sh-get k 3) (+ depth 1))
+    0))
+
+;; @import <url> [media]: t[ps,pe) is the prelude after the at-keyword
+(defn import-paren-end [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (let [q (find-in t 41 s e)]
+    (if (< q 0) e (trim-end t s q))))
+
+(defn import-url-end [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (let [c (string/char-at t (- s 1))]
+    (if (or (= c 34) (= c 39))
+      (quote-close t s c e)
+      (import-paren-end t s e))))
+
+(defn import-url-start [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (let [k (skip-ws t s e)]
+    (if (= (has-at t k e "url(") 1)
+      (let [a (skip-ws t (+ k 4) e)
+            c (string/char-at t a)]
+        (if (or (= c 34) (= c 39)) (+ a 1) a))
+      (if (or (= (string/char-at t k) 34) (= (string/char-at t k) 39)) (+ k 1) -1))))
+
+(defn import-rest [(t : String @ Region) (ue : I32) (e : I32)] : I32
+  (let [c (string/char-at t ue)
+        a (if (or (= c 34) (= c 39)) (+ ue 1) ue)
+        b (if (= (string/char-at t a) 41) (+ a 1) a)]
+    b))
+
+(defn sheet-import [(t : String @ Region) (src : I32) (ps : I32) (pe : I32) (depth : I32)] : I32
+  (let [us (import-url-start t ps pe)]
+    (if (< us 0)
+      0
+      (let [ue (import-url-end t us pe)
+            rs (import-rest t ue pe)
+            mm (media-match t rs pe)
+            par (if (= src 1) (sh-owner ps) -1)
+            k (if (= mm 1) (sh-entry (+ (* ps 2) src) 1 par src us ue) -1)]
+        (sheet-apply k depth)))))
+
+(defn at-supports-ok [(t : String @ Region) (s : I32) (e : I32)] : I32
+  (if (= (has-tok t s e "not") 1) 0 1))
+
+;; an at-rule at t[a..): returns the index to continue from
+(defn css-at-block [(t : String @ Region) (src : I32) (a : I32) (ne : I32) (pe : I32) (e : I32) (depth : I32)] : I32
+  (let [be (skip-block t pe e)
+        ce (if (and (> be pe) (= (string/char-at t (- be 1)) 125)) (- be 1) be)
+        run (cond
+              ((= (word-eq t (+ a 1) ne "media") 1) (media-match t ne pe))
+              ((= (word-eq t (+ a 1) ne "supports") 1) (at-supports-ok t ne pe))
+              ((= (word-eq t (+ a 1) ne "layer") 1) 1)
+              ((= (word-eq t (+ a 1) ne "container") 1) 0)
+              (true 0))
+        go (if (and (= run 1) (< depth 4)) (parse-css t src (+ pe 1) ce (+ depth 1)) 0)]
+    be))
+
+(defn at-prelude-end [(t : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [k i depth 0 q 0]
+    (if (>= k e)
+      e
+      (let [c (string/char-at t k)]
+        (cond
+          ((> q 0) (if (= c q) (recur (+ k 1) depth 0) (recur (+ k 1) depth q)))
+          ((or (= c 34) (= c 39)) (recur (+ k 1) depth c))
+          ((= c 40) (recur (+ k 1) (+ depth 1) 0))
+          ((= c 41) (recur (+ k 1) (if (> depth 0) (- depth 1) 0) 0))
+          ((and (= depth 0) (or (= c 59) (= c 123))) k)
+          (true (recur (+ k 1) depth 0)))))))
+
+(defn css-at [(t : String @ Region) (src : I32) (a : I32) (e : I32) (depth : I32)] : I32
+  (let [ne (id-end t (+ a 1) e)
+        pe (at-prelude-end t ne e)
+        stmt (if (< pe e) (if (= (string/char-at t pe) 59) 1 0) 1)]
+    (if (= stmt 1)
+      (do (if (= (word-eq t (+ a 1) ne "import") 1) (sheet-import t src ne pe depth) 0)
+          (+ pe 1))
+      (css-at-block t src a ne pe e depth))))
+
+(defn parse-rule [(t : String @ Region) (src : I32) (a : I32) (e : I32)] : I32
+  (let [b (find-in t 123 a e)]
+    (if (< b 0)
+      e
+      (let [d (skip-block t b e)
+            de (if (and (> d b) (= (string/char-at t (- d 1)) 125)) (- d 1) d)
+            cv (collect-vars t src (+ b 1) de)
+            r (add-selectors t src a b (+ b 1) de)]
+        d))))
+
+(defn parse-css [(t : String @ Region) (src : I32) (s : I32) (e : I32) (depth : I32)] : I32
+  (loop [i s]
+    (let [a (css-skip t i e)]
+      (cond
+        ((>= a e) 0)
+        ((= (string/char-at t a) 64) (recur (css-at t src a e depth)))
+        ((= (string/char-at t a) 125) (recur (+ a 1)))
+        (true (recur (parse-rule t src a e)))))))
 
 ;; index of "</style" at/after k, or e
 (defn style-close [(page : String @ Region) (k : I32) (e : I32)] : I32
@@ -1083,22 +2302,59 @@
         m
         (recur (+ m 1))))))
 
+(defn ws-or-gt? [(c : I32)] : Bool
+  (or (ws? c) (= c 62)))
+
+;; <style ...> at i: its rules (honouring media="..."); returns where scanning goes on
+(defn style-at [(page : String @ Region) (i : I32) (e : I32)] : I32
+  (let [gt (find-in page 62 i e)]
+    (if (< gt 0)
+      e
+      (let [ce (style-close page (+ gt 1) e)
+            ms (attr-start page (+ i 6) gt "media=")
+            me (if (< ms 0) -1 (href-end page ms gt))
+            ok (if (< me 0) 1 (media-match page ms me))
+            r (if (= ok 1) (parse-css page 0 (+ gt 1) ce 0) 0)]
+        (+ ce 1)))))
+
+;; <link rel=stylesheet href=...> at i: queue its fetch once, and apply it in document order once it is in
+(defn tag-attr [(page : String @ Region) (lit : String @ Region) (n : I32) (ne : I32) (te : I32)] : I32
+  (attr-scan lit 0 n page ne te))
+
+;; <link rel=stylesheet href=...> at i: queue its fetch once, and apply it in document order once it is in
+(defn link-at [(page : String @ Region) (i : I32) (e : I32)] : I32
+  (let [gt (find-in page 62 i e)]
+    (if (< gt 0)
+      e
+      (let [ne (+ i 5)
+            hr (tag-attr page "rel" 3 ne gt)
+            rs (slot-get 1648)
+            re (slot-get 1649)
+            hh (if (= hr 1) (tag-attr page "href" 4 ne gt) 0)
+            hs (slot-get 1648)
+            he (slot-get 1649)
+            hm (if (= hr 1) (tag-attr page "media" 5 ne gt) 0)
+            ms (slot-get 1648)
+            me (slot-get 1649)
+            ok (if (and (= hr 1) (and (= hh 1) (and (= (has-tok page rs re "stylesheet") 1) (= (has-tok page rs re "alternate") 0)))) 1 0)
+            mm (if (= hm 1) (media-match page ms me) 1)
+            k (if (and (= ok 1) (= mm 1)) (sh-entry i 0 -1 0 hs he) -1)
+            r (sheet-apply k 0)]
+        (+ gt 1)))))
+
 (defn scan-styles [(page : String @ Region) (start : I32) (e : I32)] : I32
   (loop [i start]
     (if (>= (+ i 7) e)
       0
-      (if (and (= (string/char-at page i) 60) (= (word-eq page (+ i 1) (+ i 6) "style") 1)
-               (ws-or-gt? (string/char-at page (+ i 6))))
-        (let [gt (find-in page 62 i e)]
-          (if (< gt 0)
-            0
-            (let [ce (style-close page (+ gt 1) e)
-                  r (parse-css page (+ gt 1) ce)]
-              (recur (+ ce 1)))))
+      (if (= (string/char-at page i) 60)
+        (cond
+          ((and (= (word-eq page (+ i 1) (+ i 6) "style") 1) (ws-or-gt? (string/char-at page (+ i 6))))
+           (recur (style-at page i e)))
+          ((and (= (word-eq page (+ i 1) (+ i 5) "link") 1) (ws-or-gt? (string/char-at page (+ i 5))))
+           (recur (link-at page i e)))
+          (true (recur (+ i 1))))
         (recur (+ i 1))))))
 
-(defn ws-or-gt? [(c : I32)] : Bool
-  (or (ws? c) (= c 62)))
 
 ;; ---- attributes of the tag being opened ----
 ;; start of the quoted value of attribute `lit` (e.g. "class=") in page[a,b), else -1
@@ -1122,21 +2378,17 @@
         (let [b (tok-end page a ce)]
           (if (= (hash-range page a b) h) 1 (recur b)))))))
 
-(defn apply-rules [(page : String @ Region) (h : I32) (idh : I32) (cs : I32) (ce : I32)] : I32
+;; rules whose selector matches the element at stack depth d (mode 0: normal declarations, 1: the !important ones)
+(defn apply-rules [(page : String @ Region) (d : I32) (mode : I32)] : I32
   (loop [k 0]
     (if (>= k (slot-get 30))
       0
-      (let [b (+ 40 (* k 4))
-            kind (slot-get b)
-            hh (slot-get (+ b 1))
-            hit (cond
-                  ((= kind 1) (if (= hh h) 1 0))
-                  ((= kind 5) 1)
-                  ((= kind 3) (if (= hh idh) 1 0))
-                  ((= kind 2) (if (>= cs 0) (class-has? page cs ce hh) 0))
-                  (true 0))
-            t (if (= hit 1) (apply-decls page (slot-get (+ b 2)) (slot-get (+ b 3))) 0)]
+      (let [b (+ 2100 (* k 6))
+            t (if (= (slot-get b) 1) (css-buf) page)
+            hit (sel-match t page (slot-get (+ b 1)) (slot-get (+ b 2)) d)
+            r (if (= hit 1) (apply-decls t page (slot-get (+ b 3)) (slot-get (+ b 4)) mode) 0)]
         (recur (+ k 1))))))
+
 
 (defn attr-colors [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
   (let [fs (if (= (word-eq page ns ne "font") 1) (attr-start page ne te "color=") -1)
@@ -1147,17 +2399,31 @@
         r2 (if (< be 0) 0 (set-bg (parse-color page bs be)))]
     0))
 
+(defn ext-fill [(d : I32) (cs : I32) (ce : I32) (idh : I32) (ne : I32) (te : I32)] : I32
+  (let [p (- d 1)
+        cnt (+ (xget p 3) 1)]
+    (do (xset p 3 cnt)
+        (xset d 0 idh) (xset d 1 cs) (xset d 2 ce) (xset d 3 0) (xset d 4 cnt)
+        (xset d 5 ne) (xset d 6 te) (xset d 7 (xget p 7)) (xset d 8 0) (xset d 9 0)
+        0)))
+
+;; the cascade for one element: rule declarations in specificity order, then the style="" attribute, then the same
+;; for !important (rules first, so an inline !important wins)
 (defn author-style [(page : String @ Region) (ns : I32) (ne : I32) (te : I32) (h : I32)] : I32
   (let [cs (attr-start page ne te "class=")
         ce (if (< cs 0) -1 (href-end page cs te))
         is (attr-start page ne te "id=")
         ie (if (< is 0) -1 (href-end page is te))
         idh (if (< ie 0) -2 (hash-range page is ie))
-        r1 (apply-rules page h idh cs ce)
+        d (slot-get 31)
+        x (ext-fill d cs ce idh ne te)
+        r1 (apply-rules page d 0)
         r2 (attr-colors page ns ne te)
         ss (attr-start page ne te "style=")
         se (if (< ss 0) -1 (href-end page ss te))
-        r3 (if (< se 0) 0 (apply-decls page ss se))]
+        r3 (if (< se 0) 0 (apply-decls page page ss se 0))
+        r4 (apply-rules page d 1)
+        r5 (if (< se 0) 0 (apply-decls page page ss se 1))]
     0))
 
 ;; ---- box geometry and block rows ----
@@ -1181,7 +2447,7 @@
           mr (if autor 0 mrr)
           avail (- (- pr pl) (+ ml mr))
           wc (tget 20)
-          outer0 (if (>= wc 0) (+ wc chrome) avail)
+          outer0 (if (>= wc 0) (if (and (= (slot-get 24) 1) (= (xget d 8) 1)) wc (+ wc chrome)) avail)
           outer (if (> outer0 avail) avail (if (< outer0 chrome) chrome outer0))
           free (- avail outer)
           off (if (and autol autor) (/ free 2) (if autol free 0))
@@ -2226,7 +3492,8 @@
       (slot-set 610 0) (slot-set 611 0) (slot-set 613 0) (slot-set 614 0) (slot-set 616 0) (slot-set 617 revealed)
       (slot-set 619 0) (slot-set 620 0) (slot-set 1091 -1) (slot-set 1094 -1)
       (slot-set 631 0) (slot-set 632 0) (slot-set 633 0) (slot-set 634 0) (slot-set 635 0)
-      (slot-set 640 0) (slot-set 641 0)
+      (slot-set 640 0) (slot-set 641 0) (slot-set 1740 0) (slot-set 1639 0)
+      (xset 0 3 0) (xset 0 7 0) (xset 0 8 0)
       (init-root width)
       (if (= (slot-get 24) 1) (scan-styles page start revealed) 0)
       0))
@@ -2436,9 +3703,10 @@
                  ((= k 3)
                   (let [s (href-start page i revealed)
                         e (if (< s 0) -1 (href-end page s revealed))
-                        ok (if (< e 0) -1 (note-sel ln s e (slot-get 33)))]
+                        ok (if (< e 0) -1 (note-sel ln s e (slot-get 33)))
+                        t (open-tag page i revealed)]
                     (recur (+ i 1) 1 (if (< e 0) -1 s) e (if (< e 0) ln (+ ln 1)))))
-                 ((= k 4) (recur (+ i 1) 1 -1 -1 ln))
+                 ((= k 4) (let [t (close-tag page i revealed)] (recur (+ i 1) 1 -1 -1 ln)))
                  ((= k 5) (let [t (close-tag page i revealed)] (recur (+ i 1) 1 hs he ln)))
                  (true (let [t (open-tag page i revealed)] (recur (+ i 1) 1 hs he ln))))))
             ((= c 10) (let [t (do-newline)] (recur (+ i 1) 0 hs he ln)))
@@ -2687,6 +3955,7 @@
   (do
     (drop-conn dest)
     (stream-reset)
+    (css-abort)
     (img-reset)
     (slot-set 622 0)
     (cururl-set url)
@@ -3315,13 +4584,180 @@
       (if (= (slot-get (+ 701 (* k 4))) 0) k (recur (+ k 1))))))
 
 (defn img-pump [] : I32
-  (if (and (= (slot-get 6) 1) (and (< (slot-get 4) 0) (>= (slot-get 5) 0)))
+  (if (and (= (slot-get 6) 1) (and (< (slot-get 4) 0) (and (>= (slot-get 5) 0) (= (css-busy) 0))))
     (let [k (img-next)]
       (if (< k 0)
         0
         (with-arena [fr :region/scratch 65536]
           (img-load k &mut fr))))
     0))
+
+;; ---- external stylesheets: fetched without ever blocking a frame on the body ----
+;; <link rel=stylesheet> and @import are found while the page is scanned (see scan-styles) and queued in the sheet
+;; table. A sheet is fetched through the stream module's second bank, one non-blocking pull batch per frame; the page
+;; keeps painting meanwhile, and when the text lands the whole page is restyled from the first byte: the layout
+;; shifts, by design. Plain-http sheets start while the page itself is still streaming; https sheets wait for the
+;; page stream to end (the TLS client holds one session). Connect/handshake still block, same as <img>.
+;; Slots: 1640 sheet count, 1641 sheet being fetched (-1 none), 1642 its stream handle, 1643 idle frames,
+;; 1646/1647 viewport width/height, 1634 % base px (16), 1632/1633 calc end/position, 1740 custom property count.
+(defn css-request [(host : String @ Region) (port : I32) (path : String @ Region) (url : String @ Region)
+                   (dest : Arena @ Region)] : String
+  (let [r1 (string/concat "GET " path dest)
+        r2 (string/concat r1 " HTTP/1.0\r\nHost: " dest)
+        r3 (string/concat r2 (host-header host port url dest) dest)]
+    (string/concat r3 "\r\nUser-Agent: PELLEGRINO/v1\r\nAccept: text/css,*/*;q=0.1\r\nConnection: close\r\n\r\n" dest)))
+
+;; a url found in a stylesheet resolves against that sheet's own address
+(defn resolve-from [(base : String @ Region) (h : String @ Region) (dest : Arena @ Region)] : String
+  (cond
+    ((= (string/length h) 0) "")
+    ((= (has-prefix h "https://") 1) h)
+    ((= (has-prefix h "http://") 1) h)
+    ((= (has-prefix h "//") 1) (string/concat (scheme-colon base) h dest))
+    ((= (string/char-at h 0) 47) (string/concat (url-origin base dest) h dest))
+    ((= (other-scheme? h) 1) "")
+    (true (string/concat (url-dir base dest) h dest))))
+
+(defn sheet-url [(k : I32) (page : String @ Region) (dest : Arena @ Region)] : String
+  (let [t (if (= (sh-get k 6) 1) (css-buf) page)
+        h (amp-fix (string/substring t (sh-get k 7) (sh-get k 8) dest) dest)
+        par (sh-get k 4)]
+    (if (< par 0)
+      (resolve-href h dest)
+      (resolve-from (sheet-url par page dest) h dest))))
+
+(defn css-log [(what : String @ Region) (url : String @ Region) (dest : Arena @ Region)] : I32
+  (pg-log (string/concat what url dest)))
+
+(defn css-fail [(k : I32) (url : String @ Region) (dest : Arena @ Region)] : I32
+  (do (sh-set k 1 3)
+      (slot-set 1641 -1)
+      (css-log "css: failed " url dest)
+      0))
+
+;; connect, send the request; bank 1 must already be selected
+(defn css-open [(k : I32) (url : String @ Region) (dest : Arena @ Region)] : I32
+  (let [host (url-host url dest)
+        port (url-port url)
+        path (url-path url dest)
+        fd (if (= (url-https? url) 1) (stream-connect-tls host port) (stream-connect host port))]
+    (if (< fd 0)
+      (css-fail k url dest)
+      (let [rs (stream-reset)
+            snd (stream-send fd (css-request host port path url dest))]
+        (do (sh-set k 1 1)
+            (slot-set 1641 k)
+            (slot-set 1642 fd)
+            (slot-set 1643 0)
+            (css-log "css: fetch " url dest)
+            0)))))
+
+(defn css-next [] : I32
+  (loop [k 0]
+    (if (>= k (slot-get 1640))
+      -1
+      (if (= (sh-get k 1) 0) k (recur (+ k 1))))))
+
+(defn css-begin [(page : String @ Region) (dest : Arena @ Region)] : I32
+  (let [k (css-next)]
+    (if (< k 0)
+      0
+      (let [url (sheet-url k page dest)]
+        (cond
+          ((= (string/length url) 0) (css-fail k "(no usable href)" dest))
+          ((and (>= (slot-get 4) 0) (= (url-https? url) 1)) 0)
+          (true (css-open k url dest)))))))
+
+;; pulls until nothing more has landed: 1 data keeps coming, 0 nothing yet, -1 the stream ended
+(defn css-pull [(fd : I32)] : I32
+  (loop [n 0]
+    (if (>= n 16)
+      1
+      (let [r (stream-pull fd)]
+        (cond
+          ((> r 0) (recur (+ n 1)))
+          ((= r 0) (if (> n 0) 1 0))
+          (true -1))))))
+
+(defn css-done [(k : I32) (he : I32) (url : String @ Region) (dest : Arena @ Region)] : I32
+  (let [st (css-append he 98304)]
+    (if (< st 0)
+      (css-fail k url dest)
+      (do (sh-set k 1 2)
+          (sh-set k 2 st)
+          (sh-set k 3 (- (css-len) 1))
+          (slot-set 1641 -1)
+          (slot-set 2 1)
+          (css-log (string/concat "css: loaded " (string/concat (string/i32-to-string (- (css-len) (+ st 1)) dest) " bytes " dest) dest) url dest)
+          0))))
+
+(defn css-redirect [(k : I32) (buf : String @ Region) (he : I32) (url : String @ Region) (dest : Arena @ Region)] : I32
+  (let [a (find-location buf he)]
+    (if (or (< a 0) (>= (sh-get k 9) 3))
+      (css-fail k url dest)
+      (let [e (loop [i a]
+                (if (>= i he)
+                  he
+                  (if (= (string/char-at buf i) 13) i (recur (+ i 1)))))
+            next (absolutize (string/substring buf a e dest) dest)]
+        (if (= (has-prefix next "http") 1)
+          (do (sh-set k 9 (+ (sh-get k 9) 1))
+              (css-open k next dest))
+          (css-fail k url dest))))))
+
+(defn css-parse [(k : I32) (url : String @ Region) (dest : Arena @ Region)] : I32
+  (let [buf (stream-buf)
+        he (find-hdr-end buf (stream-len))]
+    (if (< he 0)
+      (css-fail k url dest)
+      (let [code (status-code buf)]
+        (cond
+          ((and (>= code 301) (<= code 308)) (css-redirect k buf he url dest))
+          ((= code 200) (css-done k he url dest))
+          (true (css-fail k url dest)))))))
+
+(defn css-finish [(page : String @ Region) (dest : Arena @ Region)] : I32
+  (let [k (slot-get 1641)
+        fd (slot-get 1642)
+        cl (stream-close fd)
+        url (sheet-url k page dest)]
+    (css-parse k url dest)))
+
+(defn css-receive [(page : String @ Region) (dest : Arena @ Region)] : I32
+  (let [r (css-pull (slot-get 1642))
+        idle (if (= r 0) (+ (slot-get 1643) 1) 0)
+        sv (slot-set 1643 idle)]
+    (cond
+      ((< r 0) (css-finish page dest))
+      ((> idle 700) (css-finish page dest))
+      (true 0))))
+
+(defn css-busy [] : I32
+  (if (>= (slot-get 1641) 0) 1 (if (>= (css-next) 0) 1 0)))
+
+;; once per frame: start the next queued sheet, or move the one in flight along
+(defn css-pump [(page : String @ Region)] : I32
+  (if (= (css-busy) 0)
+    0
+    (with-arena [fr :region/scratch 16384]
+      (let [p (cur-page page)
+            old (stream-bank 1)
+            r (if (< (slot-get 1641) 0) (css-begin p &mut fr) (css-receive p &mut fr))
+            back (stream-bank old)]
+        r))))
+
+;; leaving the page: drop a fetch in flight and forget every sheet and custom property
+(defn css-abort [] : I32
+  (let [k (slot-get 1641)
+        old (stream-bank 1)
+        cl (if (>= k 0) (stream-close (slot-get 1642)) 0)
+        back (stream-bank old)]
+    (do (slot-set 1641 -1)
+        (slot-set 1640 0)
+        (slot-set 1740 0)
+        (css-reset)
+        0)))
+
 
 ;; ---- form submission: GET appends ?name=value&..., POST sends the same urlencoded body ----
 ;; The encoded pairs are built in the line buffer (1023 bytes max: a bigger form is refused, not truncated).
@@ -3517,6 +4953,7 @@
           (do (pg-log-n "quit; frames=" frames dest) frames)
           (let [p0 (smoke-hop frames limit dest)
                 p1 (pump-net dest)
+                pc (css-pump page)
                 pi (img-pump)
                 p2 (pump-static n)
                 p3 (present-or-wait ren page n cols rows win-w win-h)
@@ -3573,6 +5010,11 @@
                         (slot-set 24 1)
                         (slot-set 25 1)
                         (slot-set 296 -1)
+                        (slot-set 1641 -1)
+                        (slot-set 1640 0)
+                        (slot-set 1646 1280)
+                        (slot-set 1647 720)
+                        (slot-set 1634 16)
                         (slot-set 298 -1)
                         (slot-set 26 (if (= isurl 1) 0 (md-path? url (string/length url))))
                         (slot-set 17 (if (= smv 1) 4 (if (= sfm 1) 5 (if (= sky 1) 7 (if (= stog 1) 3 (if (= stab 1) 2 sclk))))))

@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-10-15 (v1.9 -- CSS3, asynchronous stylesheets)
+- Founder real-time: "ensure we support css3 on an asynchronous basis; remember embrace the layout shifts".
+- **External stylesheets, async**: `<link rel=stylesheet>` (quoted or unquoted attributes, `media=`) and `@import` are
+  queued while the page is scanned and fetched without blocking a frame (second stream bank, bounded pull batches
+  per frame; plain-http sheets while the page streams, https after it ends). The page paints first, restyles from
+  byte 0 when a sheet lands (the layout shift), applies sheets in document order. PARENA `86bb47c` adds the static
+  stylesheet store (`css-append`/`css-buf`/`css-len`/`css-reset`) and `PARENA_SLOTS` 4096 (pin bumped).
+- **Selectors**: descendant, child, compounds, attribute operators, `:first-child`, `:nth-child()`, `:not()`,
+  `:is()`/`:where()`, `:root`, `:link`, `:checked`, `:disabled`; specificity ordering + `!important`.
+- **Values**: `rgba`/`hsl`/`hsla`/`#rgba`/`#rrggbbaa` with alpha blended over the backdrop, all named colours,
+  `calc()`, `var()` + custom properties, `vw vh vmin vmax ch ex in cm mm pc`, font-size keywords, `font`
+  shorthand, gradients -> first stop.
+- **At-rules**: `@media` (width/height ranges, `and`/`not`/`,`, orientation), `@supports`, `@layer`, `@import`.
+- **Properties**: `box-sizing`, `text-transform`, `border-left/-color/-width/-style`, `inline-flex`,
+  `background-image`; links take an author `color` (`<a>` is now a real style-stack element).
+- Smoke sections 20/20b (async order; hostile sheets); `tests/smoke_server.py` gained `/slow/<file>`. Fixed along
+  the way: an `@import`-style statement at-rule used to swallow the next rule; declarations are split paren-aware
+  (`url(data:...;base64,..)`).
+- Not built: `+`/`~` combinators, `:last-child`, `:hover`, `::before/::after`, `grid`, float/position, `text-align`,
+  `opacity`/`border-radius`/`box-shadow`/transforms (parsed and ignored), `var()` in `display`, per-scope custom
+  properties. Not run: Bazel, HTTPS sheets (no mbedTLS dev on this box).
+
 ## 2026-10-15 (v1.8 -- HTML5 gaps closed)
 - `u`/`ins`/`del`/`s`/`strike` and CSS `text-decoration: underline|line-through` draw real lines; `<q>` quote marks;
   `<details>` collapses (unless `open`) and toggles on a click of its `<summary>`; tables align their columns and rule

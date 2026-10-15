@@ -22,6 +22,10 @@
 #                                      a missing file and a non-PNG fail honestly (placeholder, no crash)
 #  19. forms, entities, keys         <form> GET and POST (urlencoded body reaches the server), &amp;/&quot;/curly
 #                                      quotes, PageUp/PageDown/Home/End, Shift+J/K/L/I window move
+#  20. css3, asynchronously          <link rel=stylesheet> and @import are fetched after the page has painted (the
+#                                      first pass has only the inline rules); when they land the whole page is
+#                                      restyled (layout shift); @media, var(), selectors, !important; hostile
+#                                      sheets (huge, cyclic, malformed, junk, missing, refused) never crash it
 #  14. bundle beside the exe           (Windows/Wine only: PELLEGRINO_WINE + PELLEGRINO_EXE_DIR) cacert.pem next
 #                                      to the exe is found even when its directory is not ANSI-representable
 set -euo pipefail
@@ -234,6 +238,78 @@ for n in "smoke-keys: scroll=0" "clean exit"; do need "$n"; done
 grep -q 'smoke-keys: scroll=[1-9]' pellegrino.log || { echo "FAIL: PageDown did not scroll"; cat pellegrino.log; exit 1; }
 run "--smoke-move=http://127.0.0.1:$PORT/index.html"
 [ "$(grep -c '^window: move' pellegrino.log)" -eq 2 ] || { echo "FAIL: window did not move"; cat pellegrino.log; exit 1; }
+
+echo "== 20. css3: external sheets arrive after the first paint and restyle the page"
+cat > www/async.html <<'HTML'
+<html><head>
+<link rel="stylesheet" href="/slow/ext.css">
+<style>@import url("/slow/imp.css"); p { color: #00ff00 }</style>
+</head><body>
+<h1>Async sheet</h1>
+<p class="note">note text</p>
+<div class="box"><p>inner plain</p><span id="s">span</span></div>
+<ul><li>one</li><li>two</li><li>three</li><li>four</li></ul>
+<a href="/x" title="t">link</a>
+</body></html>
+HTML
+cat > www/ext.css <<'CSS'
+:root { --accent: #ff0000; --pad: 8px; }
+h1 { color: hsl(200, 100%, 50%); text-transform: uppercase; }
+.note { color: var(--accent); padding: var(--pad); border: 1px solid var(--accent); }
+.box > p { color: rgba(255, 255, 0, 1); }
+.box span#s { background-color: #ff00ff; color: #fff; }
+li:nth-child(odd) { color: #ffa500; }
+li:first-child { text-decoration: underline; }
+@media (max-width: 600px) { .note { color: #0000ff; } }
+@media (min-width: 800px) { ul { background: #223344; } }
+a[title] { color: #ff69b4 !important; }
+a { color: #123456; }
+CSS
+printf '.box { background: #333333; padding: 4px; }\n' > www/imp.css
+run "--smoke-keys=http://127.0.0.1:$PORT/async.html"
+for n in "css: rules=1" "css: fetch http://127.0.0.1:$PORT/slow/ext.css" "css: loaded [0-9]* bytes http://127.0.0.1:$PORT/slow/ext.css" \
+         "css: fetch http://127.0.0.1:$PORT/slow/imp.css" "css: loaded 44 bytes http://127.0.0.1:$PORT/slow/imp.css" "clean exit"; do need "$n"; done
+# order is the whole point: painted with the inline rule only, the sheet arrives later, the page restyles after
+line_of() { grep -n -- "$1" pellegrino.log | head -1 | cut -d: -f1; }
+a=$(line_of "css: rules=1$"); b=$(line_of "css: loaded"); c=$(line_of "css: rules=11$")
+[ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ] || { echo "FAIL: sheets did not arrive after the first pass"; cat pellegrino.log; exit 1; }
+absent "css: failed"
+# the max-width media rule never counts: 1 inline + 10 from ext.css, then +1 from the @import
+need "css: rules=12"
+
+echo "== 20b. css3: hostile sheets do not crash it"
+python3 - <<'PYEND'
+import random
+random.seed(7)
+open("www/big.css", "w").write("".join(".c%d{color:#%06x;margin:%dpx}\n" % (i, random.randrange(1 << 24), i % 40) for i in range(12000)))
+open("www/cyc_a.css", "w").write('@import url("cyc_b.css");\n.cyca{color:#0f0}\n')
+open("www/cyc_b.css", "w").write('@import "cyc_a.css";\n.cycb{color:#0f0}\n')
+open("www/bad.css", "w").write("""@media (min-width: {  .x{color:red}
+.y{color:var(--a};
+:root{--a:var(--b);--b:var(--a)}
+.z{color:var(--a);width:calc(1px + );margin:calc(((}
+@import ;
+@import url(;
+a[ {color:red}
+a:nth-child( {color:red}
+:not( {color:red}
+.w{width:calc(100%/0);font:;border-left:;background:rgba(;color:hsl(}
+}}}}
+/* unterminated comment
+.q{color:red}""")
+open("www/junk.css", "wb").write(bytes(random.randrange(32, 127) for _ in range(5000)))
+open("www/robust.html", "w").write("""<html><head>
+<link rel="stylesheet" href="/big.css"><link rel="stylesheet" href="cyc_a.css"><link rel=stylesheet href=bad.css>
+<link rel="stylesheet" href="junk.css"><link rel="stylesheet" href="missing.css"><link rel="stylesheet" href="http://127.0.0.1:1/x.css">
+<link rel="stylesheet" href="/old"><link rel="stylesheet" media="print" href="never.css"><link rel="alternate stylesheet" href="alt.css">
+</head><body><div class="c5 cyca q z">robust</div></body></html>""")
+PYEND
+run "--smoke-keys=http://127.0.0.1:$PORT/robust.html"
+for n in "css: loaded 98304 bytes http://127.0.0.1:$PORT/big.css" "css: rules=160" "css: loaded 335 bytes http://127.0.0.1:$PORT/bad.css" \
+         "css: failed http://127.0.0.1:$PORT/missing.css" "css: failed http://127.0.0.1:1/x.css" "clean exit"; do need "$n"; done
+absent "never.css"
+absent "alt.css"
+if [ -s pellegrino.err.log ] && grep -q "out of memory" pellegrino.err.log; then echo "FAIL: out of memory"; cat pellegrino.err.log; exit 1; fi
 
 if [ -n "${PELLEGRINO_WINE:-}" ] && [ -d "${PELLEGRINO_EXE_DIR:-/nonexistent}" ]; then
   echo "== 14. cacert.pem beside the exe, directory name not representable in the ANSI code page"
