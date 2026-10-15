@@ -14,7 +14,7 @@ bazel_dep(name = "parena", version = "0.0.0")
 git_override(
     module_name = "parena",
     remote = "https://github.com/emilyspringerton/PARENA.git",
-    commit = "d3e274b591381f3deb1730426396bd61556c1b18",
+    commit = "f3fb1bcb710da5c2b48dfede0388d77dfc864019",
 )
 
 # mbedTLS (TLS client for https://), built from source so it can allocate from a static buffer (NO MALLOC).

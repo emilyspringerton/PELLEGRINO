@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-15 (v1.2 -- CSS-lite, box model, headings, markdown)
+- **CSS-lite**: `<style>` rules (tag/.class/#id/*), inline `style=`, `<font color>`/`bgcolor`; hex (`#rgb`/`#rrggbb`),
+  `rgb()` and 23 named colors; `color`, `background`, `font-size`, `font-weight`, `display`, `margin`, `padding`, `border`.
+- **Box model** on block elements (margin / border / padding, block backgrounds); **h1-h6** at distinct sizes.
+- **Markdown** for `.md`/`.markdown` URLs and file arguments, rendered through the same style stack as HTML;
+  `[text](url)` are real, Tab-selectable links.
+- **F12 / X** toggle CSS, **F11 / P** toggle markdown. Layout shifts as bytes stream in are intentional.
+- Layout cursor is now pixel-based (variable glyph scale); the page pass is re-run each dirty frame.
+- PARENA@f3fb1bc: runtime slots 32 -> 1024 (`PARENA_SLOTS`); pin bumped. Smoke hooks `--smoke-toggle=`; section 17.
+
 ## 2026-10-15 (v1.1 — hypertext)
 - **Keyboard link selection:** Tab / Shift+Tab cycle links (wrapping, inverse-blue highlight, scrolled into view),
   Enter or Space follow the selected link. Selection resets on navigation. Smoke hook `--smoke-tab=URL`, section 16.

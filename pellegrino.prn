@@ -75,13 +75,6 @@
         (do (draw-glyph ren (string/char-at s i) (+ x (* i 12)) y 2)
             (recur (+ i 1)))))))
 
-;; tag-start newline rule: <br> <p> <h*> <div> <li> <tr> and their closers start a new line
-(defn breaks? [(page : String @ Region) (i : I32)] : Bool
-  (let [c1 (string/char-at page (+ i 1))
-        c2 (string/char-at page (+ i 2))]
-    (or (= c1 98) (= c1 112) (= c1 104) (= c1 100) (= c1 108) (= c1 116)
-        (and (= c1 47) (or (= c2 112) (= c2 104) (= c2 100) (= c2 108) (= c2 116))))))
-
 ;; Drifting-cursor layout + draw in one pass over the first `revealed` bytes.
 ;; Returns the row index just past the last drawn row (for the loading horizon).
 ;; <title> <script> <style>: their content is not page text; skipped until the closing tag
@@ -91,18 +84,6 @@
     (if (= (match-at page i "<script") 1)
       1
       (if (= (match-at page i "<style") 1) 1 0))))
-
-;; ---- hypertext ----
-;; tag kind at '<' (index i): 0 other, 1 skipped element, 2 line break, 3 <a ...>, 4 </a>
-(defn tag-kind [(page : String @ Region) (i : I32)] : I32
-  (let [c1 (string/char-at page (+ i 1))
-        c2 (string/char-at page (+ i 2))]
-    (cond
-      ((= (skip-elem? page i) 1) 1)
-      ((and (or (= c1 97) (= c1 65)) (or (= c2 32) (= c2 10) (= c2 9) (= c2 13))) 3)
-      ((and (= c1 47) (or (= c2 97) (= c2 65))) 4)
-      ((= (breaks? page i) 1) 2)
-      (true 0))))
 
 ;; index of the byte after `href=<quote>` inside the <a ...> tag opened at i (bounded by lim), else -1
 (defn href-start [(page : String @ Region) (i : I32) (lim : I32)] : I32
@@ -125,28 +106,6 @@
         -1
         (if (= (string/char-at page k) q) k (recur (+ k 1)))))))
 
-;; link cell: blue glyph + underline; if the pending click lies inside this cell, remember the href range
-(defn link-hit [(px : I32) (py : I32) (hs : I32) (he : I32)] : I32
-  (if (and (>= (slot-get 13) px) (< (slot-get 13) (+ px 12)) (>= (slot-get 14) py) (< (slot-get 14) (+ py 18)))
-    (do (slot-set 15 hs) (slot-set 16 he) 0)
-    0))
-
-;; selected link: inverse (blue bar, dark glyph); others: blue glyph
-(defn link-color [(ren : I32) (sel : Bool) (px : I32) (py : I32)] : I32
-  (if sel
-    (do (sdl2-raw-set-draw-color ren 96 165 250 255)
-        (sdl2-raw-render-fill-rect ren px py 12 18)
-        (sdl2-raw-set-draw-color ren 18 18 18 255))
-    (sdl2-raw-set-draw-color ren 96 165 250 255)))
-
-(defn draw-link [(ren : I32) (c : I32) (vis : Bool) (px : I32) (py : I32) (hs : I32) (he : I32) (ord : I32)] : I32
-  (if vis
-    (do (link-color ren (= ord (slot-get 18)) px py)
-        (draw-glyph ren c px py 2)
-        (sdl2-raw-render-fill-rect ren px (+ py 17) 12 1)
-        (link-hit px py hs he))
-    0))
-
 ;; keyboard selection: slot 18 = selected link ordinal (-1 none), 19/20 its href range, 21 its row,
 ;; 22 link count of the last full pass, 23 = scroll the selection into view after the next draw
 (defn note-sel [(ord : I32) (s : I32) (e : I32) (row : I32)] : I32
@@ -154,58 +113,1138 @@
     (do (slot-set 19 s) (slot-set 20 e) (slot-set 21 row) 0)
     0))
 
-(defn end-links [(n : I32) (row : I32)] : I32
-  (do (slot-set 22 n) row))
-
 (defn reset-sel [] : I32
   (do (slot-set 19 -1) (slot-set 20 -1) (slot-set 21 -1) 0))
 
-(defn draw-cell [(ren : I32) (c : I32) (i : I32) (revealed : I32) (vis : Bool) (px : I32) (py : I32)] : I32
-  (if vis
-    (do (if (and (= (slot-get 11) 1) (< (- revealed i) 160))
-          (sdl2-raw-set-draw-color ren 255 176 64 255)
-          (sdl2-raw-set-draw-color ren 216 216 216 255))
-        (draw-glyph ren c px py 2))
+;; ===================== style engine (v1.2): CSS-lite, box model, h1-h6, markdown =====================
+;; Everything below is re-run from the first byte on every dirty frame, so rules and tags are applied
+;; the instant their bytes land and the layout simply shifts (by design: "embrace the layout shifts").
+;; Slots: 24 css on, 25 markdown on, 26 doc is markdown, 27 last row filled, 28 md code fence open,
+;; 29 hidden-from (style-stack index, 0 none), 30 rule count, 31 style-stack top, 32 cursor col (px),
+;; 33 cursor row, 34 scroll, 35 visible rows, 36 x0, 37 y0, 38 renderer, 39 content width,
+;; 296 page background in use, 297 page background found this pass, 298 rule count last logged,
+;; 600-608 scratch (md link range, scan-int end, lengths).
+;; Rules: slot 40+4k = kind (1 tag, 2 class, 3 id, 5 *), hash, decl start, decl end   (k < 64)
+;; Style stack: slot 300+24d, d < 12: 0 tag hash, 1 fg (-1 default), 2 bg (-1 none), 3 glyph scale,
+;;   4 bold, 5 block-left px, 6 content-left px, 7 right px, 8 border w, 9 border color, 10 display:none,
+;;   11 block, 12 margin-top rows, 13 margin-right px, 14 margin-bottom rows, 15 margin-left px,
+;;   16-19 padding t/r/b/l, 21 md marker (1 line, 2 bold, 3 code, 4 fence), 22 left-bar-only border,
+;;   23 content-right px (wrap edge: right minus border and right padding).
+
+(defn lc [(c : I32)] : I32
+  (if (and (>= c 65) (<= c 90)) (+ c 32) c))
+
+(defn ws? [(c : I32)] : Bool
+  (or (= c 32) (= c 10) (= c 9) (= c 13)))
+
+(defn letter? [(c : I32)] : Bool
+  (or (and (>= c 97) (<= c 122)) (and (>= c 65) (<= c 90))))
+
+(defn digit? [(c : I32)] : Bool
+  (and (>= c 48) (<= c 57)))
+
+(defn hash-range [(page : String @ Region) (a : I32) (b : I32)] : I32
+  (loop [k a h 7]
+    (if (>= k b)
+      h
+      (recur (+ k 1) (mod (+ (* h 31) (lc (string/char-at page k))) 16777213)))))
+
+;; 1 if page[a,b) equals lit (ASCII case-insensitive on the page side)
+(defn word-eq [(page : String @ Region) (a : I32) (b : I32) (lit : String @ Region)] : I32
+  (if (= (- b a) (string/length lit))
+    (loop [k 0]
+      (if (>= k (- b a))
+        1
+        (if (= (lc (string/char-at page (+ a k))) (string/char-at lit k))
+          (recur (+ k 1))
+          0)))
     0))
+
+;; 1 if lit occurs at page[s..) with room before e
+(defn has-at [(page : String @ Region) (s : I32) (e : I32) (lit : String @ Region)] : I32
+  (if (<= (+ s (string/length lit)) e)
+    (match-at page s lit)
+    0))
+
+(defn find-in [(page : String @ Region) (ch : I32) (a : I32) (e : I32)] : I32
+  (loop [k a]
+    (if (>= k e)
+      -1
+      (if (= (string/char-at page k) ch) k (recur (+ k 1))))))
+
+(defn skip-ws [(page : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [k i]
+    (if (>= k e)
+      e
+      (if (ws? (string/char-at page k)) (recur (+ k 1)) k))))
+
+(defn trim-end [(page : String @ Region) (s : I32) (e : I32)] : I32
+  (loop [k e]
+    (if (<= k s)
+      s
+      (if (ws? (string/char-at page (- k 1))) (recur (- k 1)) k))))
+
+(defn tok-end [(page : String @ Region) (a : I32) (e : I32)] : I32
+  (loop [k a]
+    (if (>= k e)
+      e
+      (if (ws? (string/char-at page k)) k (recur (+ k 1))))))
+
+;; ---- numbers and colors ----
+(defn ret-pos [(k : I32) (v : I32)] : I32
+  (do (slot-set 601 k) v))
+
+;; decimal int at/after i (non-digits skipped); the index past it lands in slot 601
+(defn scan-int [(page : String @ Region) (i : I32) (e : I32)] : I32
+  (let [st (loop [k i]
+             (if (>= k e)
+               e
+               (if (digit? (string/char-at page k)) k (recur (+ k 1)))))]
+    (loop [m st v 0]
+      (if (and (< m e) (digit? (string/char-at page m)))
+        (recur (+ m 1) (+ (* v 10) (- (string/char-at page m) 48)))
+        (ret-pos m v)))))
+
+(defn skip-digits [(page : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [k i]
+    (if (and (< k e) (digit? (string/char-at page k))) (recur (+ k 1)) k)))
+
+(defn hexd [(c : I32)] : I32
+  (cond
+    ((and (>= c 48) (<= c 57)) (- c 48))
+    ((and (>= c 97) (<= c 102)) (- c 87))
+    ((and (>= c 65) (<= c 70)) (- c 55))
+    (true -1)))
+
+(defn hex-n [(page : String @ Region) (s : I32) (cnt : I32)] : I32
+  (loop [k 0 acc 0]
+    (if (>= k cnt)
+      acc
+      (let [d (hexd (string/char-at page (+ s k)))]
+        (if (< d 0) -1 (recur (+ k 1) (+ (* acc 16) d)))))))
+
+(defn hex3 [(page : String @ Region) (s : I32)] : I32
+  (let [a (hexd (string/char-at page s))
+        b (hexd (string/char-at page (+ s 1)))
+        c (hexd (string/char-at page (+ s 2)))]
+    (if (or (< a 0) (< b 0) (< c 0))
+      -1
+      (+ (* (* a 17) 65536) (+ (* (* b 17) 256) (* c 17))))))
+
+(defn hex-col [(page : String @ Region) (s : I32) (e : I32)] : I32
+  (let [n (- e s)]
+    (cond
+      ((= n 6) (hex-n page s 6))
+      ((= n 3) (hex3 page s))
+      (true -1))))
+
+(defn min255 [(v : I32)] : I32
+  (if (> v 255) 255 v))
+
+;; rgb(r, g, b) / rgba(r, g, b, a); s is at the 'r'
+(defn rgb-col [(page : String @ Region) (s : I32) (e : I32)] : I32
+  (let [o (find-in page 40 s e)]
+    (if (< o 0)
+      -1
+      (let [r (scan-int page (+ o 1) e)
+            p1 (slot-get 601)
+            g (scan-int page p1 e)
+            p2 (slot-get 601)
+            b (scan-int page p2 e)]
+        (+ (* (min255 r) 65536) (+ (* (min255 g) 256) (min255 b)))))))
+
+(defn name-col [(page : String @ Region) (s : I32) (e : I32)] : I32
+  (cond
+    ((= (word-eq page s e "black") 1) 0)
+    ((= (word-eq page s e "white") 1) 16777215)
+    ((= (word-eq page s e "red") 1) 16711680)
+    ((= (word-eq page s e "green") 1) 32768)
+    ((= (word-eq page s e "lime") 1) 65280)
+    ((= (word-eq page s e "blue") 1) 255)
+    ((= (word-eq page s e "yellow") 1) 16776960)
+    ((= (word-eq page s e "cyan") 1) 65535)
+    ((= (word-eq page s e "aqua") 1) 65535)
+    ((= (word-eq page s e "magenta") 1) 16711935)
+    ((= (word-eq page s e "fuchsia") 1) 16711935)
+    ((= (word-eq page s e "gray") 1) 8421504)
+    ((= (word-eq page s e "grey") 1) 8421504)
+    ((= (word-eq page s e "silver") 1) 12632256)
+    ((= (word-eq page s e "maroon") 1) 8388608)
+    ((= (word-eq page s e "olive") 1) 8421376)
+    ((= (word-eq page s e "teal") 1) 32896)
+    ((= (word-eq page s e "navy") 1) 128)
+    ((= (word-eq page s e "purple") 1) 8388736)
+    ((= (word-eq page s e "orange") 1) 16753920)
+    ((= (word-eq page s e "pink") 1) 16761035)
+    ((= (word-eq page s e "brown") 1) 10824234)
+    ((= (word-eq page s e "gold") 1) 16766720)
+    (true -1)))
+
+;; color of the token page[s0,e0): #rgb #rrggbb rgb(...) or a name; -1 when it is none of those
+(defn parse-color [(page : String @ Region) (s0 : I32) (e0 : I32)] : I32
+  (let [s (skip-ws page s0 e0)
+        e (trim-end page s e0)]
+    (cond
+      ((>= s e) -1)
+      ((= (string/char-at page s) 35) (hex-col page (+ s 1) e))
+      ((= (has-at page s e "rgb") 1) (rgb-col page s e))
+      (true (name-col page s e)))))
+
+;; first token of page[vs,ve) that is a color (for `background: url(..) no-repeat #fff` and `border: 1px solid red`)
+(defn first-color [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (loop [k vs]
+    (let [a (skip-ws page k ve)]
+      (if (>= a ve)
+        -1
+        (let [b (tok-end page a ve)
+              c (parse-color page a b)]
+          (if (>= c 0) c (recur b)))))))
+
+(defn has-tok [(page : String @ Region) (vs : I32) (ve : I32) (lit : String @ Region)] : I32
+  (loop [k vs]
+    (let [a (skip-ws page k ve)]
+      (if (>= a ve)
+        0
+        (let [b (tok-end page a ve)]
+          (if (= (word-eq page a b lit) 1) 1 (recur b)))))))
+
+(defn frac-digit [(page : String @ Region) (p : I32) (e : I32)] : I32
+  (if (and (< p e) (digit? (string/char-at page p)))
+    (- (string/char-at page p) 48)
+    0))
+
+;; "12px" "1.5em" "50%" "2" "auto" -> px (em/rem = 16 px, % of 16 px); -1 when not a length
+(defn len-num [(page : String @ Region) (s : I32) (e : I32)] : I32
+  (let [ip (scan-int page s e)
+        p (slot-get 601)
+        hasf (and (< p e) (= (string/char-at page p) 46))
+        fd (if hasf (frac-digit page (+ p 1) e) 0)
+        u (if hasf (skip-digits page (+ p 1) e) p)
+        v10 (+ (* ip 10) fd)]
+    (cond
+      ((= (has-at page u e "rem") 1) (/ (* v10 16) 10))
+      ((= (has-at page u e "em") 1) (/ (* v10 16) 10))
+      ((= (has-at page u e "%") 1) (/ (* v10 16) 1000))
+      ((= (has-at page u e "pt") 1) (/ (* v10 4) 30))
+      (true (/ v10 10)))))
+
+(defn parse-len [(page : String @ Region) (s0 : I32) (e0 : I32)] : I32
+  (let [s (skip-ws page s0 e0)
+        e (trim-end page s e0)]
+    (cond
+      ((>= s e) -1)
+      ((= (word-eq page s e "auto") 1) 0)
+      ((digit? (string/char-at page s)) (len-num page s e))
+      (true -1))))
+
+(defn push-len [(v : I32)] : I32
+  (if (< v 0)
+    0
+    (let [n (slot-get 608)]
+      (do (slot-set (+ 604 n) v)
+          (slot-set 608 (+ n 1))
+          0))))
+
+;; up to four lengths of a margin/padding value -> slots 604-607, count in 608
+(defn parse-lens [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (do (slot-set 608 0)
+      (loop [k vs]
+        (let [a (skip-ws page k ve)]
+          (if (or (>= a ve) (>= (slot-get 608) 4))
+            (slot-get 608)
+            (let [b (tok-end page a ve)
+                  st (push-len (parse-len page a b))]
+              (recur b)))))))
+
+;; ---- style stack ----
+(defn eaddr [(d : I32) (f : I32)] : I32
+  (+ 300 (+ (* d 24) f)))
+
+(defn eget [(d : I32) (f : I32)] : I32
+  (slot-get (eaddr d f)))
+
+(defn eset [(d : I32) (f : I32) (v : I32)] : I32
+  (slot-set (eaddr d f) v))
+
+(defn tget [(f : I32)] : I32
+  (eget (slot-get 31) f))
+
+(defn tset [(f : I32) (v : I32)] : I32
+  (eset (slot-get 31) f v))
+
+(defn rows-of [(px : I32)] : I32
+  (/ (+ px 17) 18))
+
+(defn lh [(scale : I32)] : I32
+  (if (>= scale 3) 2 1))
+
+(defn set-color [(ren : I32) (c : I32)] : I32
+  (sdl2-raw-set-draw-color ren (/ c 65536) (mod (/ c 256) 256) (mod c 256) 255))
+
+(defn init-root [(width : I32)] : I32
+  (do (eset 0 0 0) (eset 0 1 -1) (eset 0 2 -1) (eset 0 3 2) (eset 0 4 0)
+      (eset 0 5 0) (eset 0 6 0) (eset 0 7 width) (eset 0 8 0) (eset 0 9 0)
+      (eset 0 10 0) (eset 0 11 1) (eset 0 12 0) (eset 0 13 0) (eset 0 14 0)
+      (eset 0 15 0) (eset 0 16 0) (eset 0 17 0) (eset 0 18 0) (eset 0 19 0)
+      (eset 0 21 0) (eset 0 22 0) (eset 0 23 width)
+      0))
+
+(defn pop-entry [] : I32
+  (let [sp (slot-get 31)
+        a (if (= (slot-get 29) sp) (slot-set 29 0) 0)]
+    (if (> sp 0) (slot-set 31 (- sp 1)) 0)))
+
+;; new entry inheriting fg/scale/bold; inline entries inherit an inline parent's bg too
+(defn push-entry [(h : I32) (blk : I32)] : I32
+  (let [p (slot-get 31)
+        d (+ p 1)
+        inh (if (and (= blk 0) (= (eget p 11) 0)) (eget p 2) -1)]
+    (do (slot-set 31 d)
+        (eset d 0 h) (eset d 1 (eget p 1)) (eset d 2 inh) (eset d 3 (eget p 3)) (eset d 4 (eget p 4))
+        (eset d 5 (eget p 6)) (eset d 6 (eget p 6)) (eset d 7 (eget p 7)) (eset d 23 (eget p 23))
+        (eset d 8 0) (eset d 9 8421504) (eset d 10 0) (eset d 11 blk)
+        (eset d 12 0) (eset d 13 0) (eset d 14 0) (eset d 15 0)
+        (eset d 16 0) (eset d 17 0) (eset d 18 0) (eset d 19 0)
+        (eset d 21 0) (eset d 22 0)
+        0)))
+
+;; ---- filling: block backgrounds and borders, per row, lazily ----
+(defn fill-rect-col [(ren : I32) (c : I32) (x : I32) (y : I32) (w : I32) (h : I32)] : I32
+  (do (set-color ren c)
+      (sdl2-raw-render-fill-rect ren x y w h)))
+
+(defn bars [(ren : I32) (d : I32) (x : I32) (y : I32) (w : I32) (h : I32)] : I32
+  (let [bw (eget d 8)
+        c (set-color ren (eget d 9))
+        l (sdl2-raw-render-fill-rect ren x y bw h)]
+    (if (= (eget d 22) 1)
+      0
+      (sdl2-raw-render-fill-rect ren (- (+ x w) bw) y bw h))))
+
+(defn fill-ent [(d : I32) (r : I32) (h : I32)] : I32
+  (if (= (eget d 11) 1)
+    (let [ren (slot-get 38)
+          x (+ (slot-get 36) (eget d 5))
+          y (+ (slot-get 37) (* (- r (slot-get 34)) 18))
+          w (- (eget d 7) (eget d 5))
+          a (if (>= (eget d 2) 0) (fill-rect-col ren (eget d 2) x y w h) 0)]
+      (if (> (eget d 8) 0) (bars ren d x y w h) 0))
+    0))
+
+;; draw bg/borders of row r for style-stack entries 1..upto (h = pixel height of that line)
+(defn fill-row [(r : I32) (upto : I32) (h : I32)] : I32
+  (if (or (< r (slot-get 34)) (>= r (+ (slot-get 34) (slot-get 35))))
+    0
+    (loop [d 1]
+      (if (> d upto)
+        0
+        (let [x (fill-ent d r h)] (recur (+ d 1)))))))
+
+(defn ensure-fill [(r : I32)] : I32
+  (if (= (slot-get 27) r)
+    0
+    (do (slot-set 27 r)
+        (fill-row r (slot-get 31) (* 18 (lh (tget 3)))))))
+
+(defn blank-rows [(n : I32) (upto : I32)] : I32
+  (loop [k 0]
+    (if (>= k n)
+      0
+      (let [f (fill-row (slot-get 33) upto 18)
+            r (slot-set 33 (+ (slot-get 33) 1))]
+        (recur (+ k 1))))))
+
+(defn hline [(y : I32)] : I32
+  (let [ren (slot-get 38)
+        d (slot-get 31)]
+    (fill-rect-col ren (tget 9) (+ (slot-get 36) (tget 5)) y (- (tget 7) (tget 5)) 2)))
+
+(defn row-y [(r : I32)] : I32
+  (+ (slot-get 37) (* (- r (slot-get 34)) 18)))
+
+(defn row-vis? [(r : I32)] : Bool
+  (and (>= r (slot-get 34)) (< r (+ (slot-get 34) (slot-get 35)))))
+
+;; ---- line cursor ----
+(defn hidden? [] : Bool
+  (> (slot-get 29) 0))
+
+(defn next-line [] : I32
+  (do (slot-set 33 (+ (slot-get 33) (lh (tget 3))))
+      (slot-set 32 (tget 6))
+      0))
+
+(defn end-line [] : I32
+  (if (and (not (hidden?)) (> (slot-get 32) (tget 6)))
+    (next-line)
+    0))
+
+(defn do-br [] : I32
+  (if (hidden?) 0 (next-line)))
+
+(defn do-hr [] : I32
+  (if (hidden?)
+    0
+    (let [e (end-line)
+          r (slot-get 33)
+          f (fill-row r (slot-get 31) 18)
+          ln (if (row-vis? r)
+               (fill-rect-col (slot-get 38) 6316128 (+ (slot-get 36) (tget 6)) (+ (row-y r) 8) (- (tget 7) (tget 6)) 2)
+               0)
+          n (slot-set 33 (+ r 1))]
+      (slot-set 32 (tget 6)))))
+
+;; drop line-scoped markdown entries (heading, quote, **bold**, `code`) at a newline
+(defn md-pop-line [] : I32
+  (loop [k 0]
+    (if (and (> (slot-get 31) 0) (>= (tget 21) 1) (<= (tget 21) 3))
+      (let [p (pop-entry)] (recur (+ k 1)))
+      0)))
+
+(defn do-newline [] : I32
+  (if (hidden?)
+    (md-pop-line)
+    (let [a (ensure-fill (slot-get 33))
+          b (next-line)]
+      (md-pop-line))))
+
+;; ---- drawing one character cell ----
+(defn link-hit [(px : I32) (py : I32) (cw : I32) (ch : I32) (hs : I32) (he : I32)] : I32
+  (if (and (>= (slot-get 13) px) (< (slot-get 13) (+ px cw)) (>= (slot-get 14) py) (< (slot-get 14) (+ py ch)))
+    (do (slot-set 15 hs) (slot-set 16 he) 0)
+    0))
+
+(defn inline-bg [] : I32
+  (if (= (tget 11) 0) (tget 2) -1))
+
+;; glyph color: link blue (inverse when selected), fresh bytes amber, author color, default grey
+(defn glyph-color [(ren : I32) (i : I32) (revealed : I32) (hs : I32) (ord : I32)] : I32
+  (cond
+    ((>= hs 0)
+     (if (= ord (slot-get 18))
+       (sdl2-raw-set-draw-color ren 18 18 18 255)
+       (sdl2-raw-set-draw-color ren 96 165 250 255)))
+    ((and (= (slot-get 11) 1) (< (- revealed i) 160))
+     (sdl2-raw-set-draw-color ren 255 176 64 255))
+    ((>= (tget 1) 0) (set-color ren (tget 1)))
+    (true (sdl2-raw-set-draw-color ren 216 216 216 255))))
+
+(defn sel-bar [(ren : I32) (hs : I32) (ord : I32) (px : I32) (py : I32) (cw : I32) (ch : I32)] : I32
+  (if (and (>= hs 0) (= ord (slot-get 18)))
+    (fill-rect-col ren 6333946 px py cw ch)
+    0))
+
+(defn draw-vis [(c : I32) (i : I32) (revealed : I32) (hs : I32) (he : I32) (ord : I32)
+                (s : I32) (cw : I32) (r : I32) (col : I32)] : I32
+  (let [ren (slot-get 38)
+        px (+ (slot-get 36) col)
+        py (row-y r)
+        ch (* 18 (lh s))
+        ef (ensure-fill r)
+        bgc (inline-bg)
+        b1 (if (>= bgc 0) (fill-rect-col ren bgc px py cw ch) 0)
+        b2 (sel-bar ren hs ord px py cw ch)
+        gc (glyph-color ren i revealed hs ord)
+        g1 (draw-glyph ren c px py s)
+        g2 (if (= (tget 4) 1) (draw-glyph ren c (+ px 1) py s) 0)
+        u (if (>= hs 0) (sdl2-raw-render-fill-rect ren px (+ py (- ch 1)) cw 1) 0)
+        h (if (>= hs 0) (link-hit px py cw ch hs he) 0)]
+    0))
+
+(defn wrap-if [(cw : I32)] : I32
+  (if (and (> (+ (slot-get 32) cw) (tget 23)) (> (slot-get 32) (tget 6)))
+    (next-line)
+    0))
+
+(defn put-char [(c : I32) (i : I32) (revealed : I32) (hs : I32) (he : I32) (ord : I32)] : I32
+  (if (hidden?)
+    0
+    (let [s (tget 3)
+          cw (* 6 s)
+          w (wrap-if cw)
+          r (slot-get 33)
+          col (slot-get 32)
+          v (if (row-vis? r) (draw-vis c i revealed hs he ord s cw r col) 0)]
+      (slot-set 32 (+ col cw)))))
+
+;; ---- opening and closing elements ----
+(defn name-end [(page : String @ Region) (s : I32) (lim : I32)] : I32
+  (if (and (< s lim) (letter? (string/char-at page s)))
+    (loop [k s]
+      (if (and (< k lim)
+               (or (letter? (string/char-at page k)) (digit? (string/char-at page k))))
+        (recur (+ k 1))
+        k))
+    s))
+
+;; UA element ids: 1-6 h1-h6, 7 p, 8 generic block, 9 li, 10 bold, 11 code, 12 em, 13 small, 14 big,
+;; 15 mark, 16 pre, 17 blockquote, 18 body/html, 19 font, 20 ul/ol, 0 plain inline
+(defn ua-id [(page : String @ Region) (a : I32) (b : I32)] : I32
+  (cond
+    ((= (word-eq page a b "h1") 1) 1)
+    ((= (word-eq page a b "h2") 1) 2)
+    ((= (word-eq page a b "h3") 1) 3)
+    ((= (word-eq page a b "h4") 1) 4)
+    ((= (word-eq page a b "h5") 1) 5)
+    ((= (word-eq page a b "h6") 1) 6)
+    ((= (word-eq page a b "p") 1) 7)
+    ((= (word-eq page a b "li") 1) 9)
+    ((= (word-eq page a b "ul") 1) 20)
+    ((= (word-eq page a b "ol") 1) 20)
+    ((= (word-eq page a b "b") 1) 10)
+    ((= (word-eq page a b "strong") 1) 10)
+    ((= (word-eq page a b "code") 1) 11)
+    ((= (word-eq page a b "kbd") 1) 11)
+    ((= (word-eq page a b "tt") 1) 11)
+    ((= (word-eq page a b "em") 1) 12)
+    ((= (word-eq page a b "i") 1) 12)
+    ((= (word-eq page a b "small") 1) 13)
+    ((= (word-eq page a b "big") 1) 14)
+    ((= (word-eq page a b "mark") 1) 15)
+    ((= (word-eq page a b "pre") 1) 16)
+    ((= (word-eq page a b "blockquote") 1) 17)
+    ((= (word-eq page a b "body") 1) 18)
+    ((= (word-eq page a b "html") 1) 18)
+    ((= (word-eq page a b "font") 1) 19)
+    ((= (word-eq page a b "div") 1) 8)
+    ((= (word-eq page a b "section") 1) 8)
+    ((= (word-eq page a b "article") 1) 8)
+    ((= (word-eq page a b "header") 1) 8)
+    ((= (word-eq page a b "footer") 1) 8)
+    ((= (word-eq page a b "nav") 1) 8)
+    ((= (word-eq page a b "main") 1) 8)
+    ((= (word-eq page a b "aside") 1) 8)
+    ((= (word-eq page a b "form") 1) 8)
+    ((= (word-eq page a b "table") 1) 8)
+    ((= (word-eq page a b "tr") 1) 8)
+    ((= (word-eq page a b "dl") 1) 8)
+    ((= (word-eq page a b "dd") 1) 8)
+    ((= (word-eq page a b "dt") 1) 8)
+    (true 0)))
+
+(defn ua-block? [(ua : I32)] : I32
+  (if (or (and (>= ua 1) (<= ua 9)) (= ua 16) (= ua 17) (= ua 18) (= ua 20)) 1 0))
+
+(defn ua-h [(scale : I32) (bold : I32) (fg : I32) (mb : I32)] : I32
+  (do (tset 3 scale) (tset 4 bold) (tset 1 fg) (tset 14 mb) 0))
+
+(defn ua-code [] : I32
+  (do (tset 1 11075486) (tset 2 2500134) 0))
+
+(defn ua-pre [] : I32
+  (do (tset 1 11075486) (tset 2 2105376) (tset 16 1) (tset 18 1) (tset 19 8) (tset 17 8) 0))
+
+(defn ua-quote [] : I32
+  (do (tset 1 11579568) (tset 8 2) (tset 9 6316128) (tset 22 1) (tset 15 12) (tset 19 8) 0))
+
+(defn ua-mark [] : I32
+  (do (tset 1 0) (tset 2 16769126) 0))
+
+(defn ua-style [(ua : I32)] : I32
+  (cond
+    ((= ua 1) (ua-h 4 1 16777215 1))
+    ((= ua 2) (ua-h 3 1 16771496 1))
+    ((= ua 3) (ua-h 2 1 12572671 0))
+    ((= ua 4) (ua-h 2 0 14737632 0))
+    ((= ua 5) (ua-h 2 0 10133670 0))
+    ((= ua 6) (ua-h 1 0 10133670 0))
+    ((= ua 9) (tset 15 24))
+    ((= ua 10) (tset 4 1))
+    ((= ua 11) (ua-code))
+    ((= ua 12) (tset 1 16771496))
+    ((= ua 13) (tset 3 1))
+    ((= ua 14) (tset 3 3))
+    ((= ua 15) (ua-mark))
+    ((= ua 16) (ua-pre))
+    ((= ua 17) (ua-quote))
+    ((= ua 20) (tset 15 12))
+    (true 0)))
+
+;; ---- author CSS ----
+(defn set-fg [(c : I32)] : I32
+  (if (>= c 0) (tset 1 c) 0))
+
+(defn set-bg [(c : I32)] : I32
+  (if (>= c 0) (tset 2 c) 0))
+
+(defn set-size [(px : I32)] : I32
+  (cond
+    ((< px 0) 0)
+    ((<= px 11) (tset 3 1))
+    ((<= px 19) (tset 3 2))
+    ((<= px 27) (tset 3 3))
+    (true (tset 3 4))))
+
+(defn set-weight [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (let [a (skip-ws page vs ve)
+        b (tok-end page a ve)]
+    (cond
+      ((= (word-eq page a b "bold") 1) (tset 4 1))
+      ((= (word-eq page a b "bolder") 1) (tset 4 1))
+      ((= (word-eq page a b "normal") 1) (tset 4 0))
+      ((and (= (- b a) 3) (>= (string/char-at page a) 54) (<= (string/char-at page a) 57)) (tset 4 1))
+      (true (tset 4 0)))))
+
+(defn set-display [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (let [a (skip-ws page vs ve)
+        b (tok-end page a ve)]
+    (cond
+      ((= (word-eq page a b "none") 1) (tset 10 1))
+      ((= (word-eq page a b "block") 1) (tset 11 1))
+      ((= (word-eq page a b "list-item") 1) (tset 11 1))
+      ((= (word-eq page a b "inline") 1) (tset 11 0))
+      ((= (word-eq page a b "inline-block") 1) (tset 11 0))
+      (true 0))))
+
+;; margin / padding shorthand: base 12 (margin) or 16 (padding); order is top right bottom left
+(defn box-set [(base : I32)] : I32
+  (let [n (slot-get 608)
+        v0 (slot-get 604)
+        v1 (slot-get 605)
+        v2 (slot-get 606)
+        v3 (slot-get 607)
+        r (if (>= n 2) v1 v0)
+        b (if (>= n 3) v2 v0)
+        l (if (>= n 4) v3 (if (>= n 2) v1 v0))]
+    (if (<= n 0)
+      0
+      (do (tset base (rows-of v0))
+          (tset (+ base 1) r)
+          (tset (+ base 2) (rows-of b))
+          (tset (+ base 3) l)
+          0))))
+
+(defn box-lens [(page : String @ Region) (vs : I32) (ve : I32) (base : I32)] : I32
+  (let [n (parse-lens page vs ve)]
+    (box-set base)))
+
+(defn side-set [(field : I32) (rowsy : I32) (v : I32)] : I32
+  (if (< v 0)
+    0
+    (tset field (if (= rowsy 1) (rows-of v) v))))
+
+;; border: [width] [style] [color]; `none` / `0` removes it
+(defn set-border [(page : String @ Region) (vs : I32) (ve : I32)] : I32
+  (let [n (parse-lens page vs ve)
+        w (if (> n 0) (slot-get 604) 1)
+        c (first-color page vs ve)
+        none (has-tok page vs ve "none")]
+    (do (tset 8 (if (= none 1) 0 w))
+        (tset 9 (if (>= c 0) c 8421504))
+        0)))
+
+(defn apply-prop [(page : String @ Region) (ns : I32) (ne : I32) (vs : I32) (ve : I32)] : I32
+  (cond
+    ((= (word-eq page ns ne "color") 1) (set-fg (parse-color page vs ve)))
+    ((= (word-eq page ns ne "background-color") 1) (set-bg (parse-color page vs ve)))
+    ((= (word-eq page ns ne "background") 1) (set-bg (first-color page vs ve)))
+    ((= (word-eq page ns ne "font-size") 1) (set-size (parse-len page vs ve)))
+    ((= (word-eq page ns ne "font-weight") 1) (set-weight page vs ve))
+    ((= (word-eq page ns ne "display") 1) (set-display page vs ve))
+    ((= (word-eq page ns ne "margin") 1) (box-lens page vs ve 12))
+    ((= (word-eq page ns ne "padding") 1) (box-lens page vs ve 16))
+    ((= (word-eq page ns ne "margin-top") 1) (side-set 12 1 (parse-len page vs ve)))
+    ((= (word-eq page ns ne "margin-right") 1) (side-set 13 0 (parse-len page vs ve)))
+    ((= (word-eq page ns ne "margin-bottom") 1) (side-set 14 1 (parse-len page vs ve)))
+    ((= (word-eq page ns ne "margin-left") 1) (side-set 15 0 (parse-len page vs ve)))
+    ((= (word-eq page ns ne "padding-top") 1) (side-set 16 1 (parse-len page vs ve)))
+    ((= (word-eq page ns ne "padding-right") 1) (side-set 17 0 (parse-len page vs ve)))
+    ((= (word-eq page ns ne "padding-bottom") 1) (side-set 18 1 (parse-len page vs ve)))
+    ((= (word-eq page ns ne "padding-left") 1) (side-set 19 0 (parse-len page vs ve)))
+    ((= (word-eq page ns ne "border") 1) (set-border page vs ve))
+    (true 0)))
+
+;; name: value; name: value ... in page[ds,de)
+(defn apply-decls [(page : String @ Region) (ds : I32) (de : I32)] : I32
+  (loop [i ds]
+    (let [a (skip-ws page i de)]
+      (if (>= a de)
+        0
+        (let [colon (find-in page 58 a de)]
+          (if (< colon 0)
+            0
+            (let [semi0 (find-in page 59 colon de)
+                  semi (if (< semi0 0) de semi0)
+                  ne (trim-end page a colon)
+                  vs (skip-ws page (+ colon 1) semi)
+                  ve (trim-end page vs semi)
+                  p (apply-prop page a ne vs ve)]
+              (recur (+ semi 1)))))))))
+
+;; ---- stylesheet scanning: <style> blocks -> rule table (selector kinds: tag .class #id *) ----
+(defn comment-end [(page : String @ Region) (k : I32) (e : I32)] : I32
+  (loop [m k]
+    (if (>= (+ m 1) e)
+      e
+      (if (and (= (string/char-at page m) 42) (= (string/char-at page (+ m 1)) 47))
+        (+ m 2)
+        (recur (+ m 1))))))
+
+(defn css-skip [(page : String @ Region) (i : I32) (e : I32)] : I32
+  (loop [k i]
+    (if (>= k e)
+      e
+      (let [c (string/char-at page k)]
+        (cond
+          ((ws? c) (recur (+ k 1)))
+          ((and (= c 47) (= (string/char-at page (+ k 1)) 42)) (recur (comment-end page (+ k 2) e)))
+          (true k))))))
+
+;; index past the } that closes the { at b (nested), or e
+(defn skip-block [(page : String @ Region) (b : I32) (e : I32)] : I32
+  (loop [k b depth 0]
+    (if (>= k e)
+      e
+      (let [c (string/char-at page k)]
+        (cond
+          ((= c 123) (recur (+ k 1) (+ depth 1)))
+          ((= c 125) (if (<= depth 1) (+ k 1) (recur (+ k 1) (- depth 1))))
+          (true (recur (+ k 1) depth)))))))
+
+(defn ident? [(page : String @ Region) (s : I32) (e : I32)] : I32
+  (if (>= s e)
+    0
+    (loop [k s]
+      (if (>= k e)
+        1
+        (let [c (string/char-at page k)]
+          (if (or (letter? c) (digit? c) (= c 45) (= c 95))
+            (recur (+ k 1))
+            0))))))
+
+(defn add-rule [(page : String @ Region) (s : I32) (e : I32) (ds : I32) (de : I32)] : I32
+  (let [n (slot-get 30)
+        c (string/char-at page s)
+        kind (cond
+               ((= c 46) (if (= (ident? page (+ s 1) e) 1) 2 0))
+               ((= c 35) (if (= (ident? page (+ s 1) e) 1) 3 0))
+               ((and (= c 42) (= (- e s) 1)) 5)
+               ((= (ident? page s e) 1) 1)
+               (true 0))
+        hs (if (or (= kind 2) (= kind 3)) (+ s 1) s)]
+    (if (or (= kind 0) (>= n 64))
+      0
+      (let [b (+ 40 (* n 4))]
+        (do (slot-set b kind)
+            (slot-set (+ b 1) (hash-range page hs e))
+            (slot-set (+ b 2) ds)
+            (slot-set (+ b 3) de)
+            (slot-set 30 (+ n 1))
+            0)))))
+
+;; a comma-separated selector list page[a,b) sharing the declaration block page[ds,de)
+(defn add-selectors [(page : String @ Region) (a : I32) (b : I32) (ds : I32) (de : I32)] : I32
+  (loop [k a]
+    (if (>= k b)
+      0
+      (let [c0 (find-in page 44 k b)
+            c (if (< c0 0) b c0)
+            s (skip-ws page k c)
+            e (trim-end page s c)
+            r (if (< s e) (add-rule page s e ds de) 0)]
+        (recur (+ c 1))))))
+
+(defn parse-css [(page : String @ Region) (s : I32) (e : I32)] : I32
+  (loop [i s]
+    (let [a (css-skip page i e)]
+      (if (>= a e)
+        0
+        (let [b (find-in page 123 a e)]
+          (if (< b 0)
+            0
+            (if (= (string/char-at page a) 64)
+              (recur (skip-block page b e))
+              (let [d (find-in page 125 (+ b 1) e)]
+                (if (< d 0)
+                  0
+                  (let [r (add-selectors page a b (+ b 1) d)]
+                    (recur (+ d 1))))))))))))
+
+;; index of "</style" at/after k, or e
+(defn style-close [(page : String @ Region) (k : I32) (e : I32)] : I32
+  (loop [m k]
+    (if (>= (+ m 7) e)
+      e
+      (if (and (= (string/char-at page m) 60) (= (string/char-at page (+ m 1)) 47)
+               (= (word-eq page (+ m 2) (+ m 7) "style") 1))
+        m
+        (recur (+ m 1))))))
+
+(defn scan-styles [(page : String @ Region) (start : I32) (e : I32)] : I32
+  (loop [i start]
+    (if (>= (+ i 7) e)
+      0
+      (if (and (= (string/char-at page i) 60) (= (word-eq page (+ i 1) (+ i 6) "style") 1)
+               (ws-or-gt? (string/char-at page (+ i 6))))
+        (let [gt (find-in page 62 i e)]
+          (if (< gt 0)
+            0
+            (let [ce (style-close page (+ gt 1) e)
+                  r (parse-css page (+ gt 1) ce)]
+              (recur (+ ce 1)))))
+        (recur (+ i 1))))))
+
+(defn ws-or-gt? [(c : I32)] : Bool
+  (or (ws? c) (= c 62)))
+
+;; ---- attributes of the tag being opened ----
+;; start of the quoted value of attribute `lit` (e.g. "class=") in page[a,b), else -1
+(defn attr-start [(page : String @ Region) (a : I32) (b : I32) (lit : String @ Region)] : I32
+  (let [n (string/length lit)]
+    (loop [k a]
+      (if (>= (+ k (+ n 1)) b)
+        -1
+        (if (and (> k 0) (ws? (string/char-at page (- k 1)))
+                 (= (match-at page k lit) 1)
+                 (or (= (string/char-at page (+ k n)) 34) (= (string/char-at page (+ k n)) 39)))
+          (+ k (+ n 1))
+          (recur (+ k 1)))))))
+
+;; 1 if one of the whitespace-separated class names in page[cs,ce) hashes to h
+(defn class-has? [(page : String @ Region) (cs : I32) (ce : I32) (h : I32)] : I32
+  (loop [k cs]
+    (let [a (skip-ws page k ce)]
+      (if (>= a ce)
+        0
+        (let [b (tok-end page a ce)]
+          (if (= (hash-range page a b) h) 1 (recur b)))))))
+
+(defn apply-rules [(page : String @ Region) (h : I32) (idh : I32) (cs : I32) (ce : I32)] : I32
+  (loop [k 0]
+    (if (>= k (slot-get 30))
+      0
+      (let [b (+ 40 (* k 4))
+            kind (slot-get b)
+            hh (slot-get (+ b 1))
+            hit (cond
+                  ((= kind 1) (if (= hh h) 1 0))
+                  ((= kind 5) 1)
+                  ((= kind 3) (if (= hh idh) 1 0))
+                  ((= kind 2) (if (>= cs 0) (class-has? page cs ce hh) 0))
+                  (true 0))
+            t (if (= hit 1) (apply-decls page (slot-get (+ b 2)) (slot-get (+ b 3))) 0)]
+        (recur (+ k 1))))))
+
+(defn attr-colors [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [fs (if (= (word-eq page ns ne "font") 1) (attr-start page ne te "color=") -1)
+        fe (if (< fs 0) -1 (href-end page fs te))
+        r1 (if (< fe 0) 0 (set-fg (parse-color page fs fe)))
+        bs (attr-start page ne te "bgcolor=")
+        be (if (< bs 0) -1 (href-end page bs te))
+        r2 (if (< be 0) 0 (set-bg (parse-color page bs be)))]
+    0))
+
+(defn author-style [(page : String @ Region) (ns : I32) (ne : I32) (te : I32) (h : I32)] : I32
+  (let [cs (attr-start page ne te "class=")
+        ce (if (< cs 0) -1 (href-end page cs te))
+        is (attr-start page ne te "id=")
+        ie (if (< is 0) -1 (href-end page is te))
+        idh (if (< ie 0) -2 (hash-range page is ie))
+        r1 (apply-rules page h idh cs ce)
+        r2 (attr-colors page ns ne te)
+        ss (attr-start page ne te "style=")
+        se (if (< ss 0) -1 (href-end page ss te))
+        r3 (if (< se 0) 0 (apply-decls page ss se))]
+    0))
+
+;; ---- box geometry and block rows ----
+(defn finish-geom [(blk : I32)] : I32
+  (if (= blk 1)
+    (let [d (slot-get 31)
+          p (- d 1)
+          bl (+ (eget p 6) (tget 15))
+          bw (tget 8)
+          a (tset 5 bl)
+          b (tset 6 (+ bl (+ bw (tget 19))))
+          c (tset 7 (- (eget p 7) (tget 13)))
+          w (tset 23 (- (tget 7) (+ bw (tget 17))))]
+      0)
+    0))
+
+(defn note-hide [] : I32
+  (if (and (= (tget 10) 1) (= (slot-get 29) 0))
+    (slot-set 29 (slot-get 31))
+    0))
+
+(defn bullet [] : I32
+  (let [left (tget 6)
+        a (slot-set 32 (- left 18))
+        b (put-char 42 0 1000 -1 -1 -1)]
+    (slot-set 32 left)))
+
+(defn open-rows [(ua : I32)] : I32
+  (if (hidden?)
+    0
+    (let [a (blank-rows (tget 12) (- (slot-get 31) 1))
+          bt (if (> (tget 8) 0)
+               (if (row-vis? (slot-get 33)) (hline (row-y (slot-get 33))) 0)
+               0)
+          b (blank-rows (tget 16) (slot-get 31))
+          c (slot-set 32 (tget 6))]
+      (if (= ua 9) (bullet) 0))))
+
+(defn note-page-bg [] : I32
+  (if (>= (tget 2) 0) (slot-set 297 (tget 2)) 0))
+
+;; <p>/<li> opened while one is the current element closes it first
+(defn implied-close [(ua : I32) (h : I32)] : I32
+  (if (and (or (= ua 7) (= ua 9)) (> (slot-get 31) 0) (= (tget 0) h))
+    (close-top)
+    0))
+
+(defn push-styled [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (let [ua (ua-id page ns ne)
+        blk (ua-block? ua)
+        h (hash-range page ns ne)
+        pre (if (= blk 1) (end-line) 0)
+        ic (implied-close ua h)]
+    (if (>= (slot-get 31) 11)
+      0
+      (let [pu (push-entry h blk)
+            st (ua-style ua)
+                cs (if (= (slot-get 24) 1) (author-style page ns ne te h) 0)
+            gm (finish-geom blk)
+            pb (if (= ua 18) (note-page-bg) 0)
+            hd (note-hide)
+            op (if (= blk 1) (open-rows ua) 0)]
+        0))))
+
+(defn open-named [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
+  (cond
+    ((= (word-eq page ns ne "br") 1) (do-br))
+    ((= (word-eq page ns ne "hr") 1) (do-hr))
+    ((= (word-eq page ns ne "img") 1) 0)
+    ((= (word-eq page ns ne "meta") 1) 0)
+    ((= (word-eq page ns ne "link") 1) 0)
+    ((= (word-eq page ns ne "input") 1) 0)
+    ((= (word-eq page ns ne "base") 1) 0)
+    ((= (word-eq page ns ne "wbr") 1) 0)
+    (true (push-styled page ns ne te))))
+
+;; <name ...> at i: apply it (only once its closing '>' has arrived)
+(defn open-tag [(page : String @ Region) (i : I32) (revealed : I32)] : I32
+  (let [ns (+ i 1)
+        ne (name-end page ns revealed)
+        te (find-in page 62 ne revealed)]
+    (if (or (= ne ns) (< te 0))
+      0
+      (open-named page ns ne te))))
+
+(defn close-top [] : I32
+  (if (= (tget 11) 1)
+    (close-block (hidden?))
+    (pop-entry)))
+
+(defn close-block [(hid : Bool)] : I32
+  (let [e (if hid 0 (end-line))
+        r1 (if hid 0 (blank-rows (tget 18) (slot-get 31)))
+        bb (if (and (not hid) (> (tget 8) 0) (row-vis? (- (slot-get 33) 1)))
+             (hline (- (row-y (slot-get 33)) 2))
+             0)
+        mb (tget 14)
+        p (pop-entry)
+        r2 (if hid 0 (blank-rows mb (slot-get 31)))]
+    (slot-set 32 (tget 6))))
+
+(defn find-open [(h : I32)] : I32
+  (loop [d (slot-get 31)]
+    (if (< d 1)
+      0
+      (if (= (eget d 0) h) d (recur (- d 1))))))
+
+(defn close-to [(idx : I32)] : I32
+  (loop [k 0]
+    (if (or (< (slot-get 31) idx) (>= k 16))
+      0
+      (let [t (close-top)] (recur (+ k 1))))))
+
+(defn close-tag [(page : String @ Region) (i : I32) (revealed : I32)] : I32
+  (let [ns (+ i 2)
+        ne (name-end page ns revealed)]
+    (if (= ne ns)
+      0
+      (let [d (find-open (hash-range page ns ne))]
+        (if (> d 0) (close-to d) 0)))))
+
+;; ---- markdown (rendered through the same style stack as HTML) ----
+(defn md-on? [] : Bool
+  (and (= (slot-get 26) 1) (= (slot-get 25) 1)))
+
+(defn eol [(page : String @ Region) (i : I32) (revealed : I32)] : I32
+  (let [k (find-in page 10 i revealed)]
+    (if (< k 0) revealed k)))
+
+;; 10 + n for "#"*n followed by a space (n 1..6), else 0
+(defn md-heading-level [(page : String @ Region) (i : I32) (revealed : I32)] : I32
+  (let [n (loop [k i]
+            (if (and (< k revealed) (< (- k i) 7) (= (string/char-at page k) 35))
+              (recur (+ k 1))
+              (- k i)))]
+    (if (and (>= n 1) (<= n 6) (= (string/char-at page (+ i n)) 32))
+      (+ 10 n)
+      0)))
+
+;; [text](url) at i -> 8 with slot 600 = url start, 601 = url end, 602 = ']' index; else 0
+(defn md-link-kind [(page : String @ Region) (i : I32) (revealed : I32)] : I32
+  (let [lim (eol page i revealed)
+        j (find-in page 93 (+ i 1) lim)]
+    (if (or (< j 0) (not (= (string/char-at page (+ j 1)) 40)))
+      0
+      (let [k (find-in page 41 (+ j 2) lim)]
+        (if (< k 0)
+          0
+          (do (slot-set 600 (+ j 2)) (slot-set 601 k) (slot-set 602 j) 8))))))
+
+(defn md-kind [(page : String @ Region) (i : I32) (start : I32) (revealed : I32) (hs : I32)] : I32
+  (if (md-on?)
+    (let [c (string/char-at page i)
+          bol (or (= i start) (= (string/char-at page (- i 1)) 10))
+          fence (and bol (= (match-at page i "```") 1))]
+      (cond
+        ((= (slot-get 28) 1) (if fence 4 0))
+        (fence 4)
+        ((and bol (= c 35)) (md-heading-level page i revealed))
+        ((and bol (or (= c 45) (= c 42) (= c 43)) (= (string/char-at page (+ i 1)) 32)) 2)
+        ((and bol (= c 62) (= (string/char-at page (+ i 1)) 32)) 3)
+        ((and bol (= (match-at page i "---") 1)) 5)
+        ((and (= c 42) (= (string/char-at page (+ i 1)) 42)) 6)
+        ((= c 96) 7)
+        ((= c 91) (md-link-kind page i revealed))
+        ((and (= c 93) (>= hs 0) (= (string/char-at page (+ i 1)) 40)) 9)
+        (true 0)))
+    0))
+
+(defn md-entry [(marker : I32) (ua : I32)] : I32
+  (if (>= (slot-get 31) 11)
+    0
+    (let [p (push-entry 1 0)
+          m (tset 21 marker)]
+      (ua-style ua))))
+
+(defn md-heading [(n : I32)] : I32
+  (md-entry 1 n))
+
+(defn md-bullet [(revealed : I32)] : I32
+  (let [a (put-char 42 0 1000 -1 -1 -1)]
+    (put-char 32 0 1000 -1 -1 -1)))
+
+(defn md-quote [] : I32
+  (let [e (md-entry 1 0)
+        f (tset 1 11579568)
+        a (put-char 124 0 1000 -1 -1 -1)]
+    (put-char 32 0 1000 -1 -1 -1)))
+
+(defn md-fence-open [] : I32
+  (let [f (slot-set 28 1)]
+    (md-entry 4 11)))
+
+(defn md-fence-close [] : I32
+  (let [f (slot-set 28 0)]
+    (if (= (tget 21) 4) (pop-entry) 0)))
+
+(defn md-fence [] : I32
+  (if (= (slot-get 28) 1) (md-fence-close) (md-fence-open)))
+
+(defn md-toggle [(marker : I32) (ua : I32)] : I32
+  (if (= (tget 21) marker)
+    (pop-entry)
+    (md-entry marker ua)))
+
+;; ---- the page pass ----
+(defn init-draw [(ren : I32) (page : String @ Region) (start : I32) (revealed : I32) (scroll : I32)
+                 (rows : I32) (x0 : I32) (y0 : I32) (width : I32)] : I32
+  (do (slot-set 38 ren) (slot-set 34 scroll) (slot-set 35 rows) (slot-set 36 x0) (slot-set 37 y0)
+      (slot-set 39 width) (slot-set 31 0) (slot-set 32 0) (slot-set 33 0) (slot-set 27 -1)
+      (slot-set 28 0) (slot-set 29 0) (slot-set 30 0) (slot-set 297 -1)
+      (init-root width)
+      (if (= (slot-get 24) 1) (scan-styles page start revealed) 0)
+      0))
+
+(defn log-rules-n [(n : I32)] : I32
+  (with-arena [fr :region/scratch 256]
+    (pg-log-n "css: rules=" n &mut fr)))
+
+(defn log-rules [] : I32
+  (if (= (slot-get 30) (slot-get 298))
+    0
+    (let [n (slot-get 30)
+          a (slot-set 298 n)]
+      (log-rules-n n))))
+
+(defn page-bg-changed [] : I32
+  (do (slot-set 296 (slot-get 297)) (slot-set 2 1) 0))
+
+(defn finish-draw [(ln : I32)] : I32
+  (let [a (slot-set 22 ln)
+        b (if (= (slot-get 297) (slot-get 296)) 0 (page-bg-changed))
+        c (log-rules)]
+    (slot-get 33)))
+
+;; tag kinds at '<': 1 script/style/title (content skipped), 3 <a ...>, 4 </a>, 5 other closer, 6 comment, 0 open
+(defn tag-kind [(page : String @ Region) (i : I32)] : I32
+  (let [c1 (string/char-at page (+ i 1))
+        c2 (string/char-at page (+ i 2))
+        c3 (string/char-at page (+ i 3))]
+    (cond
+      ((= (match-at page i "<!--") 1) 6)
+      ((= (skip-elem? page i) 1) 1)
+      ((and (or (= c1 97) (= c1 65)) (ws? c2)) 3)
+      ((and (= c1 47) (or (= c2 97) (= c2 65)) (or (ws? c3) (= c3 62))) 4)
+      ((= c1 47) 5)
+      (true 0))))
 
 (defn draw-page [(ren : I32) (page : String @ Region) (start : I32) (revealed : I32) (scroll : I32)
                  (cols : I32) (rows : I32) (x0 : I32) (y0 : I32)] : I32
-  (loop [i start col 0 row 0 tag 0 hs -1 he -1 ln 0]
-    (if (>= i revealed)
-      (end-links ln row)
-      (let [c (string/char-at page i)]
-        (cond
-          ((= tag 1)
-           (recur (+ i 1) col row (if (= c 62) 0 1) hs he ln))
-          ((= tag 4)
-           (recur (+ i 1) col row (if (= c 62) 2 4) hs he ln))
-          ((= tag 2)
-           (if (and (= c 60) (= (string/char-at page (+ i 1)) 47))
-             (recur (+ i 1) col row 1 hs he ln)
-             (recur (+ i 1) col row 2 hs he ln)))
-          ((= c 60)
-           (let [k (tag-kind page i)]
-             (cond
-               ((= k 1) (recur (+ i 1) col row 4 hs he ln))
-               ((= k 2) (recur (+ i 1) 0 (if (> col 0) (+ row 1) row) 1 hs he ln))
-               ((= k 3)
-                (let [s (href-start page i revealed)
-                      e (if (< s 0) -1 (href-end page s revealed))
-                      ok (if (< e 0) -1 (note-sel ln s e row))]
-                  (recur (+ i 1) col row 1 (if (< e 0) -1 s) e (if (< e 0) ln (+ ln 1)))))
-               ((= k 4) (recur (+ i 1) col row 1 -1 -1 ln))
-               (true (recur (+ i 1) col row 1 hs he ln)))))
-          ((= c 10) (recur (+ i 1) 0 (+ row 1) 0 hs he ln))
-          ((= c 13) (recur (+ i 1) col row 0 hs he ln))
-          (true
-           (let [wrap (>= col cols)
-                 r (if wrap (+ row 1) row)
-                 cc (if wrap 0 col)
-                 vis (and (>= r scroll) (< r (+ scroll rows)))]
-             (do (if (>= hs 0)
-                   (draw-link ren c vis (+ x0 (* cc 12)) (+ y0 (* (- r scroll) 18)) hs he ln)
-                   (draw-cell ren c i revealed vis (+ x0 (* cc 12)) (+ y0 (* (- r scroll) 18))))
-                 (recur (+ i 1) (+ cc 1) r 0 hs he ln)))))))))
+  (let [ini (init-draw ren page start revealed scroll rows x0 y0 (* cols 12))]
+    (loop [i start tag 0 hs -1 he -1 ln 0]
+      (if (>= i revealed)
+        (finish-draw ln)
+        (let [c (string/char-at page i)]
+          (cond
+            ((= tag 1) (recur (+ i 1) (if (= c 62) 0 1) hs he ln))
+            ((= tag 4) (recur (+ i 1) (if (= c 62) 2 4) hs he ln))
+            ((= tag 2)
+             (if (and (= c 60) (= (string/char-at page (+ i 1)) 47))
+               (recur (+ i 1) 1 hs he ln)
+               (recur (+ i 1) 2 hs he ln)))
+            ((= tag 5)
+             (recur (+ i 1)
+                    (if (and (= c 62) (= (string/char-at page (- i 1)) 45) (= (string/char-at page (- i 2)) 45)) 0 5)
+                    hs he ln))
+            ((= c 60)
+             (let [k (tag-kind page i)]
+               (cond
+                 ((= k 1) (recur (+ i 1) 4 hs he ln))
+                 ((= k 6) (recur (+ i 4) 5 hs he ln))
+                 ((= k 3)
+                  (let [s (href-start page i revealed)
+                        e (if (< s 0) -1 (href-end page s revealed))
+                        ok (if (< e 0) -1 (note-sel ln s e (slot-get 33)))]
+                    (recur (+ i 1) 1 (if (< e 0) -1 s) e (if (< e 0) ln (+ ln 1)))))
+                 ((= k 4) (recur (+ i 1) 1 -1 -1 ln))
+                 ((= k 5) (let [t (close-tag page i revealed)] (recur (+ i 1) 1 hs he ln)))
+                 (true (let [t (open-tag page i revealed)] (recur (+ i 1) 1 hs he ln))))))
+            ((= c 10) (let [t (do-newline)] (recur (+ i 1) 0 hs he ln)))
+            ((= c 13) (recur (+ i 1) 0 hs he ln))
+            (true
+             (let [k (md-kind page i start revealed hs)]
+               (cond
+                 ((= k 0)
+                  (let [p (put-char c i revealed hs he (- ln 1))] (recur (+ i 1) 0 hs he ln)))
+                 ((>= k 11)
+                  (let [p (md-heading (- k 10))] (recur (+ i (+ (- k 10) 1)) 0 hs he ln)))
+                 ((= k 2) (let [p (md-bullet revealed)] (recur (+ i 2) 0 hs he ln)))
+                 ((= k 3) (let [p (md-quote)] (recur (+ i 2) 0 hs he ln)))
+                 ((= k 4) (let [p (md-fence)] (recur (eol page i revealed) 0 hs he ln)))
+                 ((= k 5) (let [p (do-hr)] (recur (eol page i revealed) 0 hs he ln)))
+                 ((= k 6) (let [p (md-toggle 2 10)] (recur (+ i 2) 0 hs he ln)))
+                 ((= k 7) (let [p (md-toggle 3 11)] (recur (+ i 1) 0 hs he ln)))
+                 ((= k 8)
+                  (let [s (slot-get 600)
+                        e (slot-get 601)
+                        ok (note-sel ln s e (slot-get 33))]
+                    (recur (+ i 1) 0 s e (+ ln 1))))
+                 (true (recur (+ he 1) 0 -1 -1 ln)))))))))))
 
 ;; ===================== navigation, state (slots) and the frame loop =====================
 ;; slot 0 revealed (src 0 only)  1 scroll  2 dirty  3 mode (0 view, 1 typing a URL)
@@ -400,6 +1439,17 @@
     (close-open-conn (slot-get 4) dest)
     0))
 
+(defn md-path? [(s : String @ Region) (e : I32)] : I32
+  (cond
+    ((and (>= e 3) (= (has-at s (- e 3) e ".md") 1)) 1)
+    ((and (>= e 9) (= (has-at s (- e 9) e ".markdown") 1)) 1)
+    (true 0)))
+
+(defn url-md? [(url : String @ Region)] : I32
+  (if (= (has-prefix url "http") 1)
+    (md-path? url (path-end url))
+    0))
+
 (defn start-nav [(url : String @ Region) (dest : Arena @ Region)] : I32
   (do
     (drop-conn dest)
@@ -411,6 +1461,7 @@
     (slot-set 4 -1)
     (slot-set 5 -1)
     (slot-set 12 0)
+    (slot-set 26 (url-md? url))
     (slot-set 18 -1)
     (slot-set 10 (+ (slot-get 10) 1))
     (pg-log (string/concat "navigate " url dest))
@@ -576,21 +1627,33 @@
     ((and (= (slot-get 6) 1) (= (url-https? (cururl-get)) 1)) "PELLEGRINO v1 [https]   :=go to URL   esc=quit   ")
     (true "PELLEGRINO v1   :=go to URL   esc=quit   ")))
 
+(defn flags-text [] : String
+  (cond
+    ((and (= (slot-get 24) 1) (= (slot-get 25) 1)) "css:on md:on   ")
+    ((= (slot-get 24) 1) "css:on md:off   ")
+    ((= (slot-get 25) 1) "css:off md:on   ")
+    (true "css:off md:off   ")))
+
 (defn status-text [(dest : Arena @ Region)] : String
   (if (= (slot-get 3) 1)
     (string/concat (string/concat "> " (linebuf-get) dest) "_" dest)
-    (string/concat (banner) (cururl-get) dest)))
+    (string/concat (string/concat (banner) (flags-text) dest) (cururl-get) dest)))
 
 (defn draw-status [(ren : I32) (win-w : I32) (win-h : I32)] : I32
   (with-arena [fr :region/scratch 4096]
     (draw-str ren (status-text &mut fr) 12 (- win-h 24))))
+
+(defn clear-color [(ren : I32)] : I32
+  (if (>= (slot-get 296) 0)
+    (set-color ren (slot-get 296))
+    (sdl2-raw-set-draw-color ren 18 18 18 255)))
 
 (defn render-frame [(ren : I32) (page : String @ Region) (n : I32) (cols : I32) (rows : I32)
                     (win-w : I32) (win-h : I32)] : I32
   (let [scroll (slot-get 1)
         end (cur-end page)
         rs (reset-sel)
-        bg (sdl2-raw-set-draw-color ren 18 18 18 255)
+        bg (clear-color ren)
         cl (sdl2-raw-render-clear ren)
         act (slot-set 11 (if (or (>= (slot-get 4) 0) (and (= (slot-get 6) 0) (< (slot-get 0) n))) 1 0))
         last-row (draw-page ren (cur-page page) (cur-start) end scroll cols rows 12 12)
@@ -713,6 +1776,18 @@
     (true 0)))
 
 ;; 1 = quit
+(defn toggle-css [] : I32
+  (do (slot-set 24 (- 1 (slot-get 24)))
+      (slot-set 2 1)
+      (pg-log (if (= (slot-get 24) 1) "css: on" "css: off"))
+      0))
+
+(defn toggle-md [] : I32
+  (do (slot-set 25 (- 1 (slot-get 25)))
+      (slot-set 2 1)
+      (pg-log (if (= (slot-get 25) 1) "markdown: on" "markdown: off"))
+      0))
+
 (defn select-link [(delta : I32)] : I32
   (let [n (slot-get 22)
         cur (slot-get 18)
@@ -731,6 +1806,8 @@
 
 (defn on-key-view [(k : I32)] : I32
   (cond
+    ((or (= k 1073741893) (= k 120)) (toggle-css))
+    ((or (= k 1073741892) (= k 112)) (toggle-md))
     ((= k 9) (select-link (if (shift-held?) -1 1)))
     ((or (= k (key-return)) (= k 32)) (activate-link))
     ((or (= k 27) (= k 113)) 1)
@@ -818,6 +1895,9 @@
     ((and (> limit 0) (= frames 70) (= (slot-get 17) 2)) (smoke-key 1))
     ((and (> limit 0) (= frames 80) (= (slot-get 17) 2)) (smoke-key -1))
     ((and (> limit 0) (= frames 90) (= (slot-get 17) 2)) (smoke-enter))
+    ((and (> limit 0) (= frames 40) (= (slot-get 17) 3)) (toggle-css))
+    ((and (> limit 0) (= frames 60) (= (slot-get 17) 3)) (toggle-md))
+    ((and (> limit 0) (= frames 80) (= (slot-get 17) 3)) (toggle-css))
     (true 0)))
 
 (defn frame-loop [(ren : I32) (page : String @ Region) (n : I32) (win-w : I32) (win-h : I32)
@@ -846,11 +1926,13 @@
             snav (has-prefix arg "--smoke-nav=")
             sclk (has-prefix arg "--smoke-click=")
             stab (has-prefix arg "--smoke-tab=")
+            stog (has-prefix arg "--smoke-toggle=")
             sp (if (= snav 1) (find-char arg 32 12) -1)
             url (cond
                   ((= surl 1) (string/substring arg 12 (string/length arg) &mut a))
                   ((= sclk 1) (string/substring arg 14 (string/length arg) &mut a))
                   ((= stab 1) (string/substring arg 12 (string/length arg) &mut a))
+                  ((= stog 1) (string/substring arg 15 (string/length arg) &mut a))
                   ((and (= snav 1) (> sp 0)) (string/substring arg 12 sp &mut a))
                   (true arg))
             pre (if (and (= snav 1) (> sp 0))
@@ -875,10 +1957,15 @@
                     (do (pg-log "renderer create FAILED") 3)
                     (do (pg-log "window+renderer up (borderless 1280x720)")
                         (start-text-input)
-                        (slot-set 17 (if (= stab 1) 2 sclk))
+                        (slot-set 24 1)
+                        (slot-set 25 1)
+                        (slot-set 296 -1)
+                        (slot-set 298 -1)
+                        (slot-set 26 (if (= isurl 1) 0 (md-path? url (string/length url))))
+                        (slot-set 17 (if (= stog 1) 3 (if (= stab 1) 2 sclk)))
                         (clear-click)
                         (if (= isurl 1) (start-nav url &mut a) 0)
-                        (frame-loop ren page n 1280 720 (if (or smoke (= surl 1) (= snav 1) (= sclk 1) (= stab 1)) 120 0) &mut a)
+                        (frame-loop ren page n 1280 720 (if (or smoke (= surl 1) (= snav 1) (= sclk 1) (= stab 1) (= stog 1)) 120 0) &mut a)
                         (sdl2-raw-destroy-renderer ren)
                         (sdl2-raw-destroy-window win)
                         (pg-log "clean exit")

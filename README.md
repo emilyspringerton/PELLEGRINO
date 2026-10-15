@@ -51,9 +51,29 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   `../` dot-segment normalisation (left to the server), link hover/cursor, back/forward history, `<base href>`, `target=`. Hit-testing is cell-based and the
   link colour is not yet verified by eye (no screenshot tool on the build box).
 
+- **CSS-lite, box model, headings, markdown (v1.2):** see the table below. Everything is re-laid-out from the
+  first byte on every dirty frame, so rules and tags apply the instant their bytes land and the page *shifts*
+  as it streams (by design). **F12 or `x`** toggles author CSS; **F11 or `p`** toggles markdown rendering
+  (the status bar shows `css:on md:on`). With CSS off the UA defaults stay (h1-h6 sizes, link blue, bold/code),
+  like a browser with author styles disabled.
+
+  | Area | Supported | Not supported |
+  |---|---|---|
+  | Sources | `<style>` blocks, inline `style=""`, `<font color>`, `bgcolor=` | external stylesheets (`<link>`), `@media`/`@import` (skipped) |
+  | Selectors | `tag`, `.class`, `#id`, `*`, comma lists | descendant/child/attribute/pseudo selectors, `tag.class`, specificity (source order wins) |
+  | Colors | `#rgb`, `#rrggbb`, `rgb()/rgba()` (alpha ignored), 23 named colors | `hsl()`, the other ~120 CSS names, `currentColor`, transparency |
+  | Properties | `color`, `background[-color]`, `font-size` (px/em/%/pt -> 4 glyph sizes), `font-weight`, `display: none/block/inline`, `margin[-side]`, `padding[-side]`, `border` (width + color) | `width/height`, floats, flex/grid, `text-align`, fonts, `border-radius`, per-side borders |
+  | Box model | margin / border / padding on block elements; backgrounds fill the block's rows | block `width`, margin collapsing, inline-block, tables as tables |
+  | Headings | h1-h6 (glyph scale 4,3,2,2,2,1; h1-h3 bold, distinct colors) | |
+  | Markdown | `#`..`######`, `- * +` bullets, `>` quote, fenced code, `---`, `**bold**`, `` `code` ``, `[text](url)` (a real, Tab-selectable link) for `.md`/`.markdown` URLs and file arguments | numbered lists, tables, images, `*italic*`/`_italic_`, nested lists, HTML blocks |
+
+  Limits: 64 rules, style stack depth 11, no word-wrap (breaks mid-word at the box edge), one 5x8 bitmap font.
+  Verified by eye in a headless (Xvfb) screenshot of a styled page and a markdown file; the smoke suite
+  checks rule collection, the toggles and markdown links, not pixels.
+
 **Not built yet** (see [NORTHSTAR.md](NORTHSTAR.md))
 - HTTP/1.0 only (no chunked/keep-alive/compression), HTTP/2, HTTP/3/QUIC (mbedTLS has no QUIC hooks, so
-  that rung needs its own TLS answer), CSS, images, fonts beyond the embedded bitmap
+  that rung needs its own TLS answer), images, fonts beyond the embedded bitmap
   font. DNS, connect and the TLS handshake are blocking (5 s connect timeout, 10 s handshake cap), so the
   window does not repaint while one is in flight. No session resumption, no OCSP/CRL revocation checks.
 - The Windows exe is verified under Wine (winsock, bcrypt entropy, mbedTLS static heap all exercised), not

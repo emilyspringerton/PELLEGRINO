@@ -17,6 +17,7 @@
 #  15. hypertext                      <a href> clicks: root-relative, directory-relative, and the ignored kinds
 #                                      (#fragment, mailto:)
 #  16. keyboard links                 Tab / Shift+Tab move the selection, Enter/Space follow it
+#  17. css / markdown                 <style> rules are collected, F12/X and F11/P toggle css and markdown
 #  14. bundle beside the exe           (Windows/Wine only: PELLEGRINO_WINE + PELLEGRINO_EXE_DIR) cacert.pem next
 #                                      to the exe is found even when its directory is not ANSI-representable
 set -euo pipefail
@@ -173,6 +174,20 @@ printf '<a href="/index.html">one</a> <a href="/dir/sib.html">two</a>\n' > www/l
 run "--smoke-tab=http://127.0.0.1:$PORT/link_tabs.html"
 for n in "smoke-tab: next link" "smoke-tab: previous link" "smoke-enter:" "link click: http://127.0.0.1:$PORT/index.html" "clean exit"; do need "$n"; done
 absent "link click: http://127.0.0.1:$PORT/dir/sib.html"   # Tab,Tab,Shift+Tab lands on the FIRST link
+
+echo "== 17. css rules are collected; css and markdown toggle (synthetic X, P, X)"
+cat > www/styled.html <<'HTML'
+<html><head><style>
+body { background: #101820; color: #cfe8ff }
+h1, .card { color: #f00; padding: 8px; border: 1px solid red }
+#gone { display: none }
+</style></head><body><h1>Title</h1><div class="card" style="margin: 10px">box</div><p id="gone">hidden</p></body></html>
+HTML
+printf '[go](/index.html) then **bold**\n\n# Heading\n' > www/doc.md
+run "--smoke-toggle=http://127.0.0.1:$PORT/styled.html"
+for n in "css: rules=4" "css: off" "css: rules=0" "markdown: off" "css: on" "clean exit"; do need "$n"; done
+run "--smoke-click=http://127.0.0.1:$PORT/doc.md"
+for n in "smoke-click:" "link click: http://127.0.0.1:$PORT/index.html" "clean exit"; do need "$n"; done   # a markdown [link](url) is a real link
 
 if [ -n "${PELLEGRINO_WINE:-}" ] && [ -d "${PELLEGRINO_EXE_DIR:-/nonexistent}" ]; then
   echo "== 14. cacert.pem beside the exe, directory name not representable in the ANSI code page"

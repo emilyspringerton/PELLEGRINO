@@ -23,3 +23,8 @@ Read the monorepo root `CLAUDE.md` (The Emily Way) first; this file is repo-spec
 - **mbedTLS is pinned** in two places that must agree (`MODULE.bazel` and `third_party/mbedtls/mbedtls.env`;
   `//:check_pins` enforces it). Its config is `third_party/mbedtls/pellegrino_user_config.h` (static-heap allocator).
 - **Releases ship `cacert.pem`** (Windows has no system trust store). Keep it in both zips.
+- **Style engine** (v1.2) lives in `pellegrino.prn` between `style engine` and `navigation`: cursor (col/row), rule
+  table and style stack are all *slots* (see the slot map in that block's header; PARENA runtime has 1024 cells).
+  VS0 quirks found there: a `let` inside a `cond` arm of a non-loop function is rejected (use a helper fn);
+  two sequential `loop`s in one function must not reuse a variable name (C redefinition); `(+ a b c)` is rejected
+  (nest it). Toggle keys: F12/`x` css, F11/`p` markdown (SDLK_F11/F12 are the literal 1073741892/3).
