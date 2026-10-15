@@ -46,8 +46,9 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
 
 - **Hypertext (v1.1):** `<a href>` text is drawn blue + underlined and a left click navigates (absolute,
   root-relative, `//host`, and directory-relative targets). `#fragment` and non-http schemes (`mailto:`,
-  `javascript:`) are ignored. Not yet: `../` dot-segment normalisation (left to the server), link hover/cursor,
-  keyboard link selection, back/forward history, `<base href>`, `target=`. Hit-testing is cell-based and the
+  `javascript:`) are ignored. **Keyboard:** Tab / Shift+Tab select the next / previous link (wraps; the
+  selected link is drawn as an inverse blue bar and scrolled into view), Enter or Space follows it. Not yet:
+  `../` dot-segment normalisation (left to the server), link hover/cursor, back/forward history, `<base href>`, `target=`. Hit-testing is cell-based and the
   link colour is not yet verified by eye (no screenshot tool on the build box).
 
 **Not built yet** (see [NORTHSTAR.md](NORTHSTAR.md))

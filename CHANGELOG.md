@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-10-15 (v1.1 — hypertext)
+- **Keyboard link selection:** Tab / Shift+Tab cycle links (wrapping, inverse-blue highlight, scrolled into view),
+  Enter or Space follow the selected link. Selection resets on navigation. Smoke hook `--smoke-tab=URL`, section 16.
 - **Links are clickable.** `<a href="..">` text is blue + underlined; a left click navigates. Targets resolve
   absolute / `/root` / `//host` / directory-relative against the current URL; `#frag` and non-http schemes are ignored.
 - The href is copied out of the stream buffer before navigating (start-nav resets that buffer).

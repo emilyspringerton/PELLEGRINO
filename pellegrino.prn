@@ -131,13 +131,34 @@
     (do (slot-set 15 hs) (slot-set 16 he) 0)
     0))
 
-(defn draw-link [(ren : I32) (c : I32) (vis : Bool) (px : I32) (py : I32) (hs : I32) (he : I32)] : I32
-  (if vis
+;; selected link: inverse (blue bar, dark glyph); others: blue glyph
+(defn link-color [(ren : I32) (sel : Bool) (px : I32) (py : I32)] : I32
+  (if sel
     (do (sdl2-raw-set-draw-color ren 96 165 250 255)
+        (sdl2-raw-render-fill-rect ren px py 12 18)
+        (sdl2-raw-set-draw-color ren 18 18 18 255))
+    (sdl2-raw-set-draw-color ren 96 165 250 255)))
+
+(defn draw-link [(ren : I32) (c : I32) (vis : Bool) (px : I32) (py : I32) (hs : I32) (he : I32) (ord : I32)] : I32
+  (if vis
+    (do (link-color ren (= ord (slot-get 18)) px py)
         (draw-glyph ren c px py 2)
         (sdl2-raw-render-fill-rect ren px (+ py 17) 12 1)
         (link-hit px py hs he))
     0))
+
+;; keyboard selection: slot 18 = selected link ordinal (-1 none), 19/20 its href range, 21 its row,
+;; 22 link count of the last full pass, 23 = scroll the selection into view after the next draw
+(defn note-sel [(ord : I32) (s : I32) (e : I32) (row : I32)] : I32
+  (if (= ord (slot-get 18))
+    (do (slot-set 19 s) (slot-set 20 e) (slot-set 21 row) 0)
+    0))
+
+(defn end-links [(n : I32) (row : I32)] : I32
+  (do (slot-set 22 n) row))
+
+(defn reset-sel [] : I32
+  (do (slot-set 19 -1) (slot-set 20 -1) (slot-set 21 -1) 0))
 
 (defn draw-cell [(ren : I32) (c : I32) (i : I32) (revealed : I32) (vis : Bool) (px : I32) (py : I32)] : I32
   (if vis
@@ -149,48 +170,49 @@
 
 (defn draw-page [(ren : I32) (page : String @ Region) (start : I32) (revealed : I32) (scroll : I32)
                  (cols : I32) (rows : I32) (x0 : I32) (y0 : I32)] : I32
-  (loop [i start col 0 row 0 tag 0 hs -1 he -1]
+  (loop [i start col 0 row 0 tag 0 hs -1 he -1 ln 0]
     (if (>= i revealed)
-      row
+      (end-links ln row)
       (let [c (string/char-at page i)]
         (cond
           ((= tag 1)
-           (recur (+ i 1) col row (if (= c 62) 0 1) hs he))
+           (recur (+ i 1) col row (if (= c 62) 0 1) hs he ln))
           ((= tag 4)
-           (recur (+ i 1) col row (if (= c 62) 2 4) hs he))
+           (recur (+ i 1) col row (if (= c 62) 2 4) hs he ln))
           ((= tag 2)
            (if (and (= c 60) (= (string/char-at page (+ i 1)) 47))
-             (recur (+ i 1) col row 1 hs he)
-             (recur (+ i 1) col row 2 hs he)))
+             (recur (+ i 1) col row 1 hs he ln)
+             (recur (+ i 1) col row 2 hs he ln)))
           ((= c 60)
            (let [k (tag-kind page i)]
              (cond
-               ((= k 1) (recur (+ i 1) col row 4 hs he))
-               ((= k 2) (recur (+ i 1) 0 (if (> col 0) (+ row 1) row) 1 hs he))
+               ((= k 1) (recur (+ i 1) col row 4 hs he ln))
+               ((= k 2) (recur (+ i 1) 0 (if (> col 0) (+ row 1) row) 1 hs he ln))
                ((= k 3)
                 (let [s (href-start page i revealed)
-                      e (if (< s 0) -1 (href-end page s revealed))]
-                  (recur (+ i 1) col row 1 (if (< e 0) -1 s) e)))
-               ((= k 4) (recur (+ i 1) col row 1 -1 -1))
-               (true (recur (+ i 1) col row 1 hs he)))))
-          ((= c 10) (recur (+ i 1) 0 (+ row 1) 0 hs he))
-          ((= c 13) (recur (+ i 1) col row 0 hs he))
+                      e (if (< s 0) -1 (href-end page s revealed))
+                      ok (if (< e 0) -1 (note-sel ln s e row))]
+                  (recur (+ i 1) col row 1 (if (< e 0) -1 s) e (if (< e 0) ln (+ ln 1)))))
+               ((= k 4) (recur (+ i 1) col row 1 -1 -1 ln))
+               (true (recur (+ i 1) col row 1 hs he ln)))))
+          ((= c 10) (recur (+ i 1) 0 (+ row 1) 0 hs he ln))
+          ((= c 13) (recur (+ i 1) col row 0 hs he ln))
           (true
            (let [wrap (>= col cols)
                  r (if wrap (+ row 1) row)
                  cc (if wrap 0 col)
                  vis (and (>= r scroll) (< r (+ scroll rows)))]
              (do (if (>= hs 0)
-                   (draw-link ren c vis (+ x0 (* cc 12)) (+ y0 (* (- r scroll) 18)) hs he)
+                   (draw-link ren c vis (+ x0 (* cc 12)) (+ y0 (* (- r scroll) 18)) hs he ln)
                    (draw-cell ren c i revealed vis (+ x0 (* cc 12)) (+ y0 (* (- r scroll) 18))))
-                 (recur (+ i 1) (+ cc 1) r 0 hs he)))))))))
+                 (recur (+ i 1) (+ cc 1) r 0 hs he ln)))))))))
 
 ;; ===================== navigation, state (slots) and the frame loop =====================
 ;; slot 0 revealed (src 0 only)  1 scroll  2 dirty  3 mode (0 view, 1 typing a URL)
 ;; slot 4 socket fd (-1 none)    5 body start in stream buf (-1 until headers seen)   10 navigation generation
 ;; slot 6 src (0 file/embedded page, 1 live stream, 3 error page)   7 redirects   8 error code
 ;; slot 13/14 pending click (px x/y, -1 none)   15/16 href [start,end) of the link under it (-1 none)
-;; slot 17 smoke: synthesize a click at frame 60
+;; slot 17 smoke: synthesize a click at frame 60   18-23 keyboard link selection (see note-sel)
 (defn embedded-page [] : String
   "<h1>PELLEGRINO v1</h1>
 <p>all gas; no brakes; powered by PARENA.</p>
@@ -389,6 +411,7 @@
     (slot-set 4 -1)
     (slot-set 5 -1)
     (slot-set 12 0)
+    (slot-set 18 -1)
     (slot-set 10 (+ (slot-get 10) 1))
     (pg-log (string/concat "navigate " url dest))
     (nav-dispatch url dest)))
@@ -566,6 +589,7 @@
                     (win-w : I32) (win-h : I32)] : I32
   (let [scroll (slot-get 1)
         end (cur-end page)
+        rs (reset-sel)
         bg (sdl2-raw-set-draw-color ren 18 18 18 255)
         cl (sdl2-raw-render-clear ren)
         act (slot-set 11 (if (or (>= (slot-get 4) 0) (and (= (slot-get 6) 0) (< (slot-get 0) n))) 1 0))
@@ -642,6 +666,18 @@
 (defn clear-click [] : I32
   (do (slot-set 13 -1) (slot-set 14 -1) (slot-set 15 -1) (slot-set 16 -1) 0))
 
+;; after a draw pass that followed a Tab: scroll so the selected link's row is on screen
+(defn ensure-visible [(rows : I32)] : I32
+  (if (and (= (slot-get 23) 1) (>= (slot-get 21) 0))
+    (let [r (slot-get 21)
+          sc (slot-get 1)
+          d (slot-set 23 0)]
+      (cond
+        ((< r sc) (scroll-to r))
+        ((>= r (+ sc rows)) (scroll-to (+ (- r rows) 1)))
+        (true 0)))
+    0))
+
 ;; called right after a frame was drawn: the draw pass filled slots 15/16 if the click landed on a link
 (defn resolve-click [(page : String @ Region) (dest : Arena @ Region)] : I32
   (if (>= (slot-get 15) 0)
@@ -677,8 +713,26 @@
     (true 0)))
 
 ;; 1 = quit
+(defn select-link [(delta : I32)] : I32
+  (let [n (slot-get 22)
+        cur (slot-get 18)
+        nxt (if (> delta 0)
+              (if (>= (+ cur 1) n) 0 (+ cur 1))
+              (if (<= cur 0) (- n 1) (- cur 1)))]
+    (if (<= n 0)
+      0
+      (do (slot-set 18 nxt) (slot-set 23 1) (slot-set 2 1) 0))))
+
+;; Enter/Space: follow the selected link exactly as a click on it would (resolve-click picks it up)
+(defn activate-link [] : I32
+  (if (and (>= (slot-get 18) 0) (>= (slot-get 19) 0))
+    (do (slot-set 15 (slot-get 19)) (slot-set 16 (slot-get 20)) 0)
+    0))
+
 (defn on-key-view [(k : I32)] : I32
   (cond
+    ((= k 9) (select-link (if (shift-held?) -1 1)))
+    ((or (= k (key-return)) (= k 32)) (activate-link))
     ((or (= k 27) (= k 113)) 1)
     ((= k (key-up)) (scroll-to (- (slot-get 1) 1)))
     ((= k (key-down)) (scroll-to (+ (slot-get 1) 1)))
@@ -748,10 +802,22 @@
   (do (pg-log "smoke-click: synthetic click on the first cell")
       (on-click 14 14)))
 
+(defn smoke-key [(d : I32)] : I32
+  (do (pg-log (if (> d 0) "smoke-tab: next link" "smoke-tab: previous link"))
+      (select-link d)))
+
+(defn smoke-enter [] : I32
+  (do (pg-log "smoke-enter: activate selected link")
+      (activate-link)))
+
 (defn smoke-hop [(frames : I32) (limit : I32) (dest : Arena @ Region)] : I32
   (cond
     ((and (> limit 0) (= frames 20) (> (linebuf-len) 0)) (hop dest))
     ((and (> limit 0) (= frames 60) (= (slot-get 17) 1)) (smoke-click))
+    ((and (> limit 0) (= frames 60) (= (slot-get 17) 2)) (smoke-key 1))
+    ((and (> limit 0) (= frames 70) (= (slot-get 17) 2)) (smoke-key 1))
+    ((and (> limit 0) (= frames 80) (= (slot-get 17) 2)) (smoke-key -1))
+    ((and (> limit 0) (= frames 90) (= (slot-get 17) 2)) (smoke-enter))
     (true 0)))
 
 (defn frame-loop [(ren : I32) (page : String @ Region) (n : I32) (win-w : I32) (win-h : I32)
@@ -767,7 +833,8 @@
                 p1 (pump-net dest)
                 p2 (pump-static n)
                 p3 (present-or-wait ren page n cols rows win-w win-h)
-                p4 (resolve-click page dest)]
+                p4 (resolve-click page dest)
+                p5 (ensure-visible rows)]
             (recur (+ frames 1))))))))
 
 (defn pellegrino-run [(arg : String @ Region)] : I32
@@ -778,10 +845,12 @@
             surl (has-prefix arg "--smoke-url=")
             snav (has-prefix arg "--smoke-nav=")
             sclk (has-prefix arg "--smoke-click=")
+            stab (has-prefix arg "--smoke-tab=")
             sp (if (= snav 1) (find-char arg 32 12) -1)
             url (cond
                   ((= surl 1) (string/substring arg 12 (string/length arg) &mut a))
                   ((= sclk 1) (string/substring arg 14 (string/length arg) &mut a))
+                  ((= stab 1) (string/substring arg 12 (string/length arg) &mut a))
                   ((and (= snav 1) (> sp 0)) (string/substring arg 12 sp &mut a))
                   (true arg))
             pre (if (and (= snav 1) (> sp 0))
@@ -806,10 +875,10 @@
                     (do (pg-log "renderer create FAILED") 3)
                     (do (pg-log "window+renderer up (borderless 1280x720)")
                         (start-text-input)
-                        (slot-set 17 sclk)
+                        (slot-set 17 (if (= stab 1) 2 sclk))
                         (clear-click)
                         (if (= isurl 1) (start-nav url &mut a) 0)
-                        (frame-loop ren page n 1280 720 (if (or smoke (= surl 1) (= snav 1) (= sclk 1)) 120 0) &mut a)
+                        (frame-loop ren page n 1280 720 (if (or smoke (= surl 1) (= snav 1) (= sclk 1) (= stab 1)) 120 0) &mut a)
                         (sdl2-raw-destroy-renderer ren)
                         (sdl2-raw-destroy-window win)
                         (pg-log "clean exit")

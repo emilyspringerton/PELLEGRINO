@@ -16,6 +16,7 @@
 #                                      failed non-blocking connect via exceptfds, not writefds)
 #  15. hypertext                      <a href> clicks: root-relative, directory-relative, and the ignored kinds
 #                                      (#fragment, mailto:)
+#  16. keyboard links                 Tab / Shift+Tab move the selection, Enter/Space follow it
 #  14. bundle beside the exe           (Windows/Wine only: PELLEGRINO_WINE + PELLEGRINO_EXE_DIR) cacert.pem next
 #                                      to the exe is found even when its directory is not ANSI-representable
 set -euo pipefail
@@ -166,6 +167,12 @@ for f in link_mail link_frag; do
   absent "link click:"   # not navigable: ignored, the page stays put
   [ "$(grep -c '^navigate ' pellegrino.log)" -eq 1 ] || { echo "FAIL: $f navigated"; cat pellegrino.log; exit 1; }
 done
+
+echo "== 16. keyboard link selection (synthetic Tab, Tab, Shift+Tab, Enter)"
+printf '<a href="/index.html">one</a> <a href="/dir/sib.html">two</a>\n' > www/link_tabs.html
+run "--smoke-tab=http://127.0.0.1:$PORT/link_tabs.html"
+for n in "smoke-tab: next link" "smoke-tab: previous link" "smoke-enter:" "link click: http://127.0.0.1:$PORT/index.html" "clean exit"; do need "$n"; done
+absent "link click: http://127.0.0.1:$PORT/dir/sib.html"   # Tab,Tab,Shift+Tab lands on the FIRST link
 
 if [ -n "${PELLEGRINO_WINE:-}" ] && [ -d "${PELLEGRINO_EXE_DIR:-/nonexistent}" ]; then
   echo "== 14. cacert.pem beside the exe, directory name not representable in the ANSI code page"
