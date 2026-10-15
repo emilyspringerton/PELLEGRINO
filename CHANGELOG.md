@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-15 (v1.5 -- <img>, PNG)
+- `<img src>`: PNG (8-bit RGB/RGBA/palette, non-interlaced) fetched after the page stream closes, decoded by PARENA's
+  `image/png`, held in the new `image/store` pixel pool, drawn scaled (nearest neighbour). Placeholder text while
+  loading/failing; layout shifts when pixels land. Needs PARENA `7a03498` (second stream bank, `stream-copy-bytes`,
+  image store) -- pin bumped. Smoke section 18. CSS background images deliberately not supported.
+- Verified over plain HTTP in Xvfb with screenshots (RGBA with transparent corner, RGB scaled by `width=`, palette,
+  404, JPEG, a 512x512 random-noise 1 MB PNG, a 3000x3000 PNG refused). Bazel suite and the HTTPS image path not run here.
+
 ## 2026-10-15 (v1.4 -- flexbox, the cheap kind)
 - `display: flex` lays a container's block children out as equal-width columns side by side (`gap` / `column-gap`
   honoured; `flex-direction: column` falls back to normal stacking). The child count is scanned ahead in the bytes

@@ -17,6 +17,9 @@
 (module pellegrino)
 (import string)
 (import net/stream)
+(import image/store)
+(import bytes)
+(import image/png)
 (export pellegrino-run)
 
 ;; 5x8 font, ASCII 32..126, 8 rows x 1 byte each = 16 hex chars per glyph (tools/gen_font.py).
@@ -125,6 +128,8 @@
 ;; Flexbox (one level): 610 container stack index (0 none), 611 child count, 612 start row, 613 child index,
 ;; 614 rows painted so far by closed children, 615 gap px, 616 children entered, 617 revealed, 618 tag end,
 ;; 619 gap value, 620 gap owner (stack index).
+;; Images: 621 tag index of the <img> being opened, 622 entry count (max 24); entry k at slot 700+4k:
+;; +0 tag index in the page buffer, +1 state (0 queued, 1 loaded, 2 failed), +2 image store id.
 ;; 296 page background in use, 297 page background found this pass, 298 rule count last logged,
 ;; 600-608 scratch (md link range, scan-int end, lengths).
 ;; Rules: slot 40+4k = kind (1 tag, 2 class, 3 id, 5 *), hash, decl start, decl end   (k < 64)
@@ -1160,11 +1165,122 @@
             op (if (= blk 1) (open-rows ua) 0)]
         0))))
 
+;; ---- <img> (PNG): placeholder until the bytes are fetched + decoded, then the pixels, nearest-neighbour ----
+(defn img-find [(pos : I32)] : I32
+  (loop [k 0]
+    (if (>= k (slot-get 622))
+      -1
+      (if (= (slot-get (+ 700 (* k 4))) pos) k (recur (+ k 1))))))
+
+(defn img-add [(pos : I32)] : I32
+  (let [k (slot-get 622)]
+    (if (or (>= k 24) (not (= (slot-get 6) 1)))
+      -1
+      (do (slot-set (+ 700 (* k 4)) pos)
+          (slot-set (+ 701 (* k 4)) 0)
+          (slot-set (+ 702 (* k 4)) -1)
+          (slot-set 622 (+ k 1))
+          k))))
+
+(defn img-entry [(pos : I32)] : I32
+  (let [k (img-find pos)]
+    (if (>= k 0) k (img-add pos))))
+
+;; integer value of a quoted attribute (width="64" / "64px"); -1 when absent
+(defn attr-int [(page : String @ Region) (ne : I32) (te : I32) (lit : String @ Region)] : I32
+  (let [s (attr-start page ne te lit)]
+    (if (< s 0)
+      -1
+      (let [e (href-end page s te)]
+        (if (or (< e 0) (not (digit? (string/char-at page s))))
+          -1
+          (scan-int page s e))))))
+
+;; one scanline of the scaled image: runs of equal colour become one rect
+(defn img-scan [(id : I32) (sy : I32) (py : I32) (x0 : I32) (dw : I32) (nw : I32)] : I32
+  (let [ren (slot-get 38)]
+    (loop [dx 0 rs 0 rc -2]
+      (if (>= dx dw)
+        (if (>= rc 0) (fill-rect-col ren rc (+ x0 rs) py (- dx rs) 1) 0)
+        (let [c (img-px id (/ (* dx nw) dw) sy)]
+          (if (= c rc)
+            (recur (+ dx 1) rs rc)
+            (let [f (if (>= rc 0) (fill-rect-col ren rc (+ x0 rs) py (- dx rs) 1) 0)]
+              (recur (+ dx 1) dx c))))))))
+
+(defn img-paint [(id : I32) (x0 : I32) (y0 : I32) (dw : I32) (dh : I32)] : I32
+  (let [nw (img-w id)
+        nh (img-h id)
+        top (slot-get 37)
+        bot (+ (slot-get 37) (* (slot-get 35) 18))]
+    (loop [dy 0]
+      (if (>= dy dh)
+        0
+        (let [py (+ y0 dy)
+              d (if (and (>= py top) (< py bot)) (img-scan id (/ (* dy nh) dh) py x0 dw nw) 0)]
+          (recur (+ dy 1)))))))
+
+(defn img-alt [(page : String @ Region) (ne : I32) (te : I32)] : I32
+  (let [s (attr-start page ne te "alt=")]
+    (if (< s 0)
+      0
+      (let [e (href-end page s te)]
+        (loop [k s]
+          (if (or (>= k e) (>= (- k s) 40))
+            0
+            (let [p (put-char (string/char-at page k) 0 1000 -1 -1 -1)]
+              (recur (+ k 1)))))))))
+
+(defn img-label [(state : I32)] : I32
+  (let [a (if (= state 2) (put-char 33 0 1000 -1 -1 -1) 0)
+        b (put-char 91 0 1000 -1 -1 -1)
+        c (put-char 105 0 1000 -1 -1 -1)
+        d (put-char 109 0 1000 -1 -1 -1)
+        e (put-char 103 0 1000 -1 -1 -1)
+        f (put-char 93 0 1000 -1 -1 -1)]
+    (put-char 32 0 1000 -1 -1 -1)))
+
+;; display size: width=/height= when given, else natural; shrunk to the box, capped at 320 high
+(defn img-dw [(nw : I32) (aw : I32)] : I32
+  (let [w (if (> aw 0) aw nw)
+        avail (- (tget 23) (tget 6))]
+    (if (> w avail) (if (> avail 8) avail 8) w)))
+
+(defn img-dh [(nw : I32) (nh : I32) (dw : I32) (ah : I32)] : I32
+  (let [h (if (> ah 0) ah (/ (* dw nh) nw))
+        h2 (if (> h 320) 320 h)]
+    (if (< h2 1) 1 h2)))
+
+(defn img-block [(id : I32) (aw : I32) (ah : I32)] : I32
+  (let [nw (img-w id)
+        nh (img-h id)
+        dw (img-dw nw aw)
+        dh (img-dh nw nh dw ah)
+        e (end-line)
+        r0 (slot-get 33)
+        x0 (+ (slot-get 36) (tget 6))
+        y0 (row-y r0)
+        rows (rows-of dh)
+        b (blank-rows rows (slot-get 31))
+        p (img-paint id x0 y0 dw dh)]
+    (slot-set 32 (tget 6))))
+
+(defn img-open [(page : String @ Region) (ne : I32) (te : I32)] : I32
+  (if (hidden?)
+    0
+    (let [k (img-entry (slot-get 621))
+          st (if (>= k 0) (slot-get (+ 701 (* k 4))) 0)
+          id (if (>= k 0) (slot-get (+ 702 (* k 4))) -1)]
+      (if (and (= st 1) (>= id 0))
+        (img-block id (attr-int page ne te "width=") (attr-int page ne te "height="))
+        (let [a (img-label st)]
+          (img-alt page ne te))))))
+
 (defn open-named [(page : String @ Region) (ns : I32) (ne : I32) (te : I32)] : I32
   (cond
     ((= (word-eq page ns ne "br") 1) (do-br))
     ((= (word-eq page ns ne "hr") 1) (do-hr))
-    ((= (word-eq page ns ne "img") 1) 0)
+    ((= (word-eq page ns ne "img") 1) (img-open page ne te))
     ((= (word-eq page ns ne "meta") 1) 0)
     ((= (word-eq page ns ne "link") 1) 0)
     ((= (word-eq page ns ne "input") 1) 0)
@@ -1176,7 +1292,8 @@
 (defn open-tag [(page : String @ Region) (i : I32) (revealed : I32)] : I32
   (let [ns (+ i 1)
         ne (name-end page ns revealed)
-        te (find-in page 62 ne revealed)]
+        te (find-in page 62 ne revealed)
+        m (slot-set 621 i)]
     (if (or (= ne ns) (< te 0))
       0
       (open-named page ns ne te))))
@@ -1611,6 +1728,8 @@
   (do
     (drop-conn dest)
     (stream-reset)
+    (img-reset)
+    (slot-set 622 0)
     (cururl-set url)
     (slot-set 0 0)
     (slot-set 1 0)
@@ -2057,6 +2176,139 @@
     ((and (> limit 0) (= frames 80) (= (slot-get 17) 3)) (toggle-css))
     (true 0)))
 
+;; ---- <img> fetching: one image per frame, synchronous (bounded), only once the page stream has closed ----
+;; DNS/connect/TLS already block the window; an image fetch is the same kind of pause, capped at ~3 s of
+;; silence. Bytes land in the stream module's second bank so the page text is never disturbed.
+(defn img-request [(host : String @ Region) (port : I32) (path : String @ Region) (url : String @ Region)
+                   (dest : Arena @ Region)] : String
+  (let [r1 (string/concat "GET " path dest)
+        r2 (string/concat r1 " HTTP/1.0\r\nHost: " dest)
+        r3 (string/concat r2 (host-header host port url dest) dest)]
+    (string/concat r3 "\r\nUser-Agent: PELLEGRINO/v1\r\nAccept: image/png,*/*\r\nConnection: close\r\n\r\n" dest)))
+
+;; pull until the connection ends, the 2 MiB bank is full, or ~3 s pass with no new bytes
+(defn img-drain [(fd : I32)] : I32
+  (loop [idle 0]
+    (if (> idle 600)
+      0
+      (let [r (stream-pull fd)]
+        (cond
+          ((> r 0) (recur 0))
+          ((= r 0) (let [d (sdl2_delay_raw 5)] (recur (+ idle 1))))
+          (true 0))))))
+
+(defn be32 [(data : Bytes) (p : I32)] : I32
+  (+ (* (bytes/bytes-get data p) 16777216)
+     (+ (* (bytes/bytes-get data (+ p 1)) 65536)
+        (+ (* (bytes/bytes-get data (+ p 2)) 256) (bytes/bytes-get data (+ p 3))))))
+
+(defn png-sig? [(data : Bytes)] : Bool
+  (and (= (bytes/bytes-get data 0) 137)
+       (and (= (bytes/bytes-get data 1) 80)
+            (and (= (bytes/bytes-get data 2) 78) (= (bytes/bytes-get data 3) 71)))))
+
+(defn img-decode-ok [(data : Bytes) (w : I32) (h : I32) (dest : Arena @ Region)] : I32
+  (let [img (png-decode data dest)]
+    (if (= (get-field img :ok) 0)
+      -1
+      (img-store (get-field img :pixels) w h))))
+
+(defn img-decode-dims [(data : Bytes) (dest : Arena @ Region)] : I32
+  (let [w (be32 data 16)
+        h (be32 data 20)]
+    (if (or (<= w 0) (or (<= h 0) (or (> w 2048) (or (> h 2048) (> (* w h) 262144)))))
+      -1
+      (img-decode-ok data w h dest))))
+
+(defn img-decode [(he : I32) (dest : Arena @ Region)] : I32
+  (let [data (stream-copy-bytes he dest)]
+    (if (< (bytes/bytes-len data) 33)
+      -1
+      (if (png-sig? data) (img-decode-dims data dest) -1))))
+
+(defn img-hop [(url : String @ Region) (hops : I32) (dest : Arena @ Region)] : I32
+  (let [host (url-host url dest)
+        port (url-port url)
+        path (url-path url dest)
+        fd (if (= (url-https? url) 1) (stream-connect-tls host port) (stream-connect host port))]
+    (if (< fd 0)
+      -1
+      (let [rs (stream-reset)
+            snd (stream-send fd (img-request host port path url dest))
+            dr (img-drain fd)
+            cl (stream-close fd)]
+        (img-parse url hops dest)))))
+
+(defn img-redirect [(buf : String @ Region) (he : I32) (hops : I32) (dest : Arena @ Region)] : I32
+  (let [a (find-location buf he)]
+    (if (or (< a 0) (>= hops 3))
+      -1
+      (let [e (loop [i a]
+                (if (>= i he)
+                  he
+                  (if (= (string/char-at buf i) 13) i (recur (+ i 1)))))
+            next (absolutize (string/substring buf a e dest) dest)]
+        (if (= (has-prefix next "http") 1)
+          (img-hop next (+ hops 1) dest)
+          -1)))))
+
+(defn img-parse [(url : String @ Region) (hops : I32) (dest : Arena @ Region)] : I32
+  (let [buf (stream-buf)
+        he (find-hdr-end buf (stream-len))]
+    (if (< he 0)
+      -1
+      (let [code (status-code buf)]
+        (cond
+          ((and (>= code 301) (<= code 308)) (img-redirect buf he hops dest))
+          ((= code 200) (img-decode he dest))
+          (true -1))))))
+
+(defn img-src-url [(k : I32) (dest : Arena @ Region)] : String
+  (let [pos (slot-get (+ 700 (* k 4)))
+        page (stream-buf)
+        n (stream-len)
+        ns (+ pos 1)
+        ne (name-end page ns n)
+        te (find-in page 62 ne n)
+        s (if (< te 0) -1 (attr-start page ne te "src="))
+        e (if (< s 0) -1 (href-end page s te))]
+    (if (< e 0)
+      ""
+      (resolve-href (string/substring page s e dest) dest))))
+
+(defn img-done [(k : I32) (id : I32) (url : String @ Region) (dest : Arena @ Region)] : I32
+  (do (slot-set (+ 701 (* k 4)) (if (>= id 0) 1 2))
+      (slot-set (+ 702 (* k 4)) id)
+      (slot-set 2 1)
+      (if (>= id 0)
+        (pg-log (string/concat (string/concat "img: loaded " url dest) (string/concat " " (string/i32-to-string (img-w id) dest) dest) dest))
+        (pg-log (string/concat "img: failed " url dest)))
+      0))
+
+(defn img-load [(k : I32) (dest : Arena @ Region)] : I32
+  (let [url (img-src-url k dest)]
+    (if (= (string/length url) 0)
+      (img-done k -1 "(no usable src)" dest)
+      (let [old (stream-bank 1)
+            id (img-hop url 0 dest)
+            back (stream-bank 0)]
+        (img-done k id url dest)))))
+
+(defn img-next [] : I32
+  (loop [k 0]
+    (if (>= k (slot-get 622))
+      -1
+      (if (= (slot-get (+ 701 (* k 4))) 0) k (recur (+ k 1))))))
+
+(defn img-pump [] : I32
+  (if (and (= (slot-get 6) 1) (and (< (slot-get 4) 0) (>= (slot-get 5) 0)))
+    (let [k (img-next)]
+      (if (< k 0)
+        0
+        (with-arena [fr :region/scratch 65536]
+          (img-load k &mut fr))))
+    0))
+
 (defn frame-loop [(ren : I32) (page : String @ Region) (n : I32) (win-w : I32) (win-h : I32)
                   (limit : I32) (dest : Arena @ Region)] : I32
   (let [cols (/ (- win-w 24) 12)
@@ -2068,6 +2320,7 @@
           (do (pg-log-n "quit; frames=" frames dest) frames)
           (let [p0 (smoke-hop frames limit dest)
                 p1 (pump-net dest)
+                pi (img-pump)
                 p2 (pump-static n)
                 p3 (present-or-wait ren page n cols rows win-w win-h)
                 p4 (resolve-click page dest)

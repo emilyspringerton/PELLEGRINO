@@ -18,6 +18,8 @@
 #                                      (#fragment, mailto:)
 #  16. keyboard links                 Tab / Shift+Tab move the selection, Enter/Space follow it
 #  17. css / markdown                 <style> rules are collected, F12/X and F11/P toggle css and markdown
+#  18. images                         <img src=x.png> is fetched, decoded and stored once the page stream closed;
+#                                      a missing file and a non-PNG fail honestly (placeholder, no crash)
 #  14. bundle beside the exe           (Windows/Wine only: PELLEGRINO_WINE + PELLEGRINO_EXE_DIR) cacert.pem next
 #                                      to the exe is found even when its directory is not ANSI-representable
 set -euo pipefail
@@ -188,6 +190,23 @@ run "--smoke-toggle=http://127.0.0.1:$PORT/styled.html"
 for n in "css: rules=4" "css: off" "css: rules=0" "markdown: off" "css: on" "clean exit"; do need "$n"; done
 run "--smoke-click=http://127.0.0.1:$PORT/doc.md"
 for n in "smoke-click:" "link click: http://127.0.0.1:$PORT/index.html" "clean exit"; do need "$n"; done   # a markdown [link](url) is a real link
+
+echo "== 18. <img>: PNG decoded and stored; a 404 and a JPEG fail honestly"
+python3 - <<'PY'
+import struct, zlib
+def png(w, h, rgb):
+    raw = b"".join(b"\x00" + bytes(rgb) * w for _ in range(h))
+    def chunk(t, d):
+        c = struct.pack(">I", len(d)) + t + d
+        return c + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) \
+        + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+open("www/red.png", "wb").write(png(20, 10, (255, 0, 0)))
+open("www/fake.jpg", "wb").write(b"\xff\xd8\xff\xe0 not a png")
+open("www/pics.html", "w").write('<p>a<img src="red.png" alt="red"> b<img src="/gone.png" alt="gone"> c<img src="fake.jpg" alt="jpg"> d</p>\n')
+PY
+run "--smoke-url=http://127.0.0.1:$PORT/pics.html"
+for n in "img: loaded http://127.0.0.1:$PORT/red.png 20" "img: failed http://127.0.0.1:$PORT/gone.png" "img: failed http://127.0.0.1:$PORT/fake.jpg" "clean exit"; do need "$n"; done
 
 if [ -n "${PELLEGRINO_WINE:-}" ] && [ -d "${PELLEGRINO_EXE_DIR:-/nonexistent}" ]; then
   echo "== 14. cacert.pem beside the exe, directory name not representable in the ANSI code page"

@@ -13,6 +13,10 @@ parena_compile_c(
         "@parena//stdlib:array.prn",
         "@parena//stdlib:io.prn",
         "@parena//stdlib:sdl2.prn",
+        "@parena//stdlib:bytes.prn",
+        "@parena//stdlib:compress/inflate.prn",
+        "@parena//stdlib:image/png.prn",
+        "@parena//stdlib:image/store.prn",
         "@parena//stdlib:net/stream.prn",
     ],
 )

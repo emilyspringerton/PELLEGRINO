@@ -34,3 +34,6 @@ Read the monorepo root `CLAUDE.md` (The Emily Way) first; this file is repo-spec
 - Flexbox (v1.4): scratch slots 610-620 (see the header block in `pellegrino.prn`), single level; children share the
   start row (`flex-enter`), `fill-start` stops later columns repainting the container chain over earlier ones. VS0: `do`
   inside an `if` in a `let` binding does not compile (`do(...)` emitted) -- wrap it in a helper fn.
+- Images (v1.5): img entries live in slots 700+4k (see header); fetch is `img-pump` (frame loop), only when the page
+  stream is closed, via PARENA's stream bank 1; `stream-buf` is a C string -- never read image bytes through it, use
+  `stream-copy-bytes`. Cap w*h at 262144: decode memory is ~5x the pixel bytes out of the static pool.

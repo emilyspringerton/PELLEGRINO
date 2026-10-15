@@ -71,9 +71,19 @@ A web browser and terminal shell stripped to essentials: no defensive layers, no
   Verified by eye in a headless (Xvfb) screenshot of a styled page and a markdown file; the smoke suite
   checks rule collection, the toggles and markdown links, not pixels.
 
+- **Images (v1.5):** `<img src>` of an 8-bit non-interlaced **PNG** (RGB, RGBA, palette; decoded by PARENA's own
+  `image/png`) is fetched over http/https once the page stream has closed, decoded, and drawn with nearest-neighbour
+  scaling (`width=`/`height=` attributes honoured, shrunk to the box, capped at 320 px high; alpha < 128 is skipped,
+  no blending). Until it lands the tag shows `[img] alt`; a failure shows `![img] alt`, and the layout shifts when the
+  pixels arrive. Limits: 2048 px a side and 262144 pixels, 2 MiB file, 24 images per page, one fetch per frame and
+  each one is synchronous (up to ~3 s of silence while it runs), http(s) pages only (not file arguments), no JPEG/GIF/
+  WebP/SVG, no CSS `background-image`, images are not links-aware (a click on one is just a click). Verified live
+  over plain HTTP with RGBA/RGB/palette fixtures and a screenshot; the HTTPS image path is the same code behind
+  `stream-connect-tls` but was not exercised on this box (no mbedTLS dev).
+
 **Not built yet** (see [NORTHSTAR.md](NORTHSTAR.md))
 - HTTP/1.0 only (no chunked/keep-alive/compression), HTTP/2, HTTP/3/QUIC (mbedTLS has no QUIC hooks, so
-  that rung needs its own TLS answer), images, fonts beyond the embedded bitmap
+  that rung needs its own TLS answer), other image formats, fonts beyond the embedded bitmap
   font. DNS, connect and the TLS handshake are blocking (5 s connect timeout, 10 s handshake cap), so the
   window does not repaint while one is in flight. No session resumption, no OCSP/CRL revocation checks.
 - The Windows exe is verified under Wine (winsock, bcrypt entropy, mbedTLS static heap all exercised), not
