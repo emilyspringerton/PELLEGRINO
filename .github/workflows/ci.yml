@@ -14,8 +14,10 @@ concurrency:
   cancel-in-progress: false
 
 # Build (Bazel) + headless smoke test + Principle 21 CONSTRUCT, then bundle the real clients:
-#   pellegrino_linux_x86_64.zip  = binary + bundled libSDL2 + RUN.sh (+ CONSTRUCT)
-#   pellegrino_windows.zip       = pellegrino.exe + SDL2.dll + RUN.bat (+ CONSTRUCT), flat, no folder prefix
+#   pellegrino_linux_x86_64.zip  = binary + bundled libSDL2 + cacert.pem + RUN.sh (+ CONSTRUCT)
+#   pellegrino_windows.zip       = pellegrino.exe + SDL2.dll + cacert.pem + RUN.bat (+ CONSTRUCT), flat, no folder prefix
+# https:// is real: mbedTLS (pinned, built from source with a static heap) verifies chain + hostname.
+# cacert.pem is the runner's ca-certificates bundle -- the whole trust store on Windows.
 # Every green push to main auto-bumps the MINOR version, tags, and publishes a GitHub Release.
 # Every run writes logs to real text files next to the executable (pellegrino.log etc.) -- see RUN.bat/RUN.sh.
 jobs:
@@ -52,12 +54,13 @@ jobs:
       BAZEL: bazelisk
     steps:
       - uses: actions/checkout@v4
-      - name: Install deps (SDL2, Xvfb, zip, bazelisk)
+      - name: Install deps (SDL2, Xvfb, openssl, zip, bazelisk)
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev xvfb zip file
+          sudo apt-get install -y libsdl2-dev xvfb zip file openssl ca-certificates
           sudo curl -fsSL -o /usr/local/bin/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
+          echo "fd8fdff418a1758887520fa42da7e6ae39aefc788cf5e7f7bb8db6934d279fc4  /usr/local/bin/bazelisk" | sha256sum -c -
           sudo chmod +x /usr/local/bin/bazelisk
       - name: Bazel build + test (PARENA -> C -> binary, headless smoke under Xvfb)
         run: bazelisk test //... --copt=-DPELLEGRINO_VERSION='"${{ needs.version.outputs.version }}"'
@@ -100,7 +103,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    name: Windows cross-build (mingw), bundle exe + SDL2.dll + RUN.bat
+    name: Windows cross-build (mingw), bundle exe + SDL2.dll + cacert.pem + RUN.bat
     needs: version
     runs-on: ubuntu-latest
     env:
@@ -111,15 +114,18 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 libsdl2-dev zip file
+          sudo apt-get install -y mingw-w64 libsdl2-dev zip file bzip2 ca-certificates
           sudo curl -fsSL -o /usr/local/bin/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64
+          echo "fd8fdff418a1758887520fa42da7e6ae39aefc788cf5e7f7bb8db6934d279fc4  /usr/local/bin/bazelisk" | sha256sum -c -
           sudo chmod +x /usr/local/bin/bazelisk
           curl -fsSL -o sdl2-mingw.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-devel-2.30.9-mingw.tar.gz
+          # SDL2.dll ships in the user-facing zip: pin it like mbedTLS (scripts/fetch_mbedtls.sh)
+          echo "b188d165dc4a0372042bff3d0c18e9bb90772581e92a7b8b47b521b47714f75c  sdl2-mingw.tar.gz" | sha256sum -c -
           tar xzf sdl2-mingw.tar.gz
           echo "SDL2_MINGW=$PWD/SDL2-2.30.9/x86_64-w64-mingw32" >> "$GITHUB_ENV"
       - name: Generate Source Construct
         run: bash scripts/generate_construct.sh PELLEGRINO_CONSTRUCT.txt
-      - name: "Cross-compile and bundle (flat zip - exe + SDL2.dll + RUN.bat)"
+      - name: "Cross-compile (incl. mbedTLS) and bundle (flat zip - exe + SDL2.dll + cacert.pem + RUN.bat)"
         env:
           PELLEGRINO_VERSION: ${{ needs.version.outputs.version }}
         run: bash scripts/package_windows.sh
@@ -138,6 +144,41 @@ jobs:
           name: PELLEGRINO_Release_Windows_${{ github.run_number }}
           path: release_bin_windows/*
           if-no-files-found: error
+
+  # The Windows exe is cross-compiled, so nothing above ever *runs* it. This job does: the real PE under
+  # Wine + Xvfb, through the same tests/smoke.sh the Linux build passes (live HTTP, redirects, HTTPS with
+  # trusted / untrusted / wrong-host certificates). Winsock, bcrypt entropy and the mingw-built mbedTLS
+  # static heap are exercised for real. Not yet in release.needs: promote it once it has proven stable on
+  # the hosted runners.
+  windows-smoke:
+    name: Windows exe smoke test (Wine + Xvfb)
+    needs: windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: PELLEGRINO_Release_Windows_${{ github.run_number }}
+          path: win_zip
+      - name: Install Wine, Xvfb, openssl
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine64 libz-mingw-w64 xvfb openssl python3 unzip
+      - name: Run the smoke suite against pellegrino.exe
+        run: |
+          set -euo pipefail
+          WINE=/usr/lib/wine/wine64
+          [ -x "$WINE" ] || WINE="$(command -v wine64 || command -v wine)"
+          unzip -q win_zip/pellegrino_windows.zip -d winapp
+          export WINEPREFIX="$HOME/.wine-pellegrino" WINEDEBUG=-all WINEARCH=win64
+          xvfb-run -a "$WINE" wineboot --init || true
+          # Wine's own user32 imports zlib1.dll; make sure the prefix can resolve it.
+          Z=/usr/x86_64-w64-mingw32/lib/zlib1.dll
+          [ -f "$WINEPREFIX/drive_c/windows/system32/zlib1.dll" ] || { [ -f "$Z" ] && cp "$Z" "$WINEPREFIX/drive_c/windows/system32/"; } || true
+          printf '#!/bin/sh\nexec "%s" "%s/winapp/pellegrino.exe" "$@"\n' "$WINE" "$PWD" > wine-run.sh
+          chmod +x wine-run.sh
+          PELLEGRINO_BIN="$PWD/wine-run.sh" PELLEGRINO_WINE="$WINE" PELLEGRINO_EXE_DIR="$PWD/winapp" bash tests/smoke.sh
 
   release:
     name: Tag & Release

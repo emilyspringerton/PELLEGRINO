@@ -1,0 +1,15 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# The user-config header that @mbedtls compiles in (MBEDTLS_USER_CONFIG_FILE). Lives in this repo so
+# the Windows packaging script and Bazel share one copy.
+cc_library(
+    name = "user_config",
+    hdrs = ["pellegrino_user_config.h"],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)
+
+exports_files([
+    "pellegrino_user_config.h",
+    "mbedtls.env",
+])

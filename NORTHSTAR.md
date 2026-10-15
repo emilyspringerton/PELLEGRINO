@@ -10,10 +10,11 @@ With <4 from america. CLEAN BUILDS FIRST.*
 
 ## 0. Status (2026-10-14)
 
-v1 is built and shipping: a borderless SDL2 window that fetches a URL over plain HTTP (live, winsock on Windows) and
+v1 is built and shipping: a borderless SDL2 window that fetches a URL over HTTP or **HTTPS** (live, winsock on Windows;
+TLS through the PARENA runtime's mbedTLS binding, chain and hostname always verified) and
 streams it onto the glass, or an embedded/file page; pure
-PARENA + a ~25-line C host, no malloc, logs to real files, Bazel build, headless smoke test, and CI that
-auto-tags and releases Linux + Windows bundles on every green push to `main`. The product page is `site/`.
+PARENA + a ~25-line C host, no malloc (TLS included — mbedTLS runs on a static heap), logs to real files, Bazel build,
+headless smoke test, and CI that auto-tags and releases Linux + Windows bundles on every green push to `main`. The product page is `site/`.
 See `README.md` for the honest built / not-built split. Everything below this section is still the direction.
 
 ## 1. The feeling
@@ -82,7 +83,9 @@ parsing, layout and display get made then, PARENA-first, against what PARENA rea
 once" feeling):
 
 1. **HTTP/1.1 over TCP** — exists today (`net/http`); enough for the feel demo.
-2. **TLS** — exists (`net/tls`); needed because real HTTP/2 and HTTP/3 are TLS-only in practice.
+2. **TLS** — **built** (v0.4): `net/stream`'s TLS half over mbedTLS 3.6 (TLS 1.3 + 1.2), always-verified chain + hostname,
+   static-heap so the no-malloc rule holds. Needed because real HTTP/2 and HTTP/3 are TLS-only in practice. ALPN is
+   the next step for HTTP/2; mbedTLS cannot do QUIC, so HTTP/3 will need its own TLS answer.
 3. **HTTP/2** — frame codec, stream ids, HPACK, flow control; interleaved streams into the arena. First true
    multiplexed page load.
 4. **HTTP/3 over QUIC** — QUIC transport over `net/udp` plus its own framing (HTTP/3 is *not* HTTP/2's framing re-run);
