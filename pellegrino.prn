@@ -30,6 +30,13 @@
 (export embed-action-start)
 (export embed-action-end)
 (export embed-ack)
+(export embed-nav-open)
+(export embed-nav-start)
+(export embed-nav-step)
+(export embed-nav-click)
+(export embed-nav-wheel)
+(export embed-nav-key)
+(export embed-nav-text)
 
 ;; 5x8 font, ASCII 32..126, 8 rows x 1 byte each = 16 hex chars per glyph (tools/gen_font.py).
 (defn font-data [] : String
@@ -690,25 +697,38 @@
 (defn calc-prod [(page : String @ Region)] : I32
   (calc-prod-rest page (calc-factor page)))
 
+;; VS0 quirk: a `do` inside a `cond` arm (used for its value) is rejected -- helper fn instead.
+(defn calc-prod-mul [(page : String @ Region) (p : I32) (acc : I32)] : I32
+  (do (slot-set 1633 (+ p 1)) (calc-prod-rest page (calc-mul acc (calc-factor page)))))
+
+(defn calc-prod-div [(page : String @ Region) (p : I32) (acc : I32)] : I32
+  (do (slot-set 1633 (+ p 1)) (calc-prod-rest page (calc-div acc (calc-factor page)))))
+
 (defn calc-prod-rest [(page : String @ Region) (acc : I32)] : I32
   (let [p (skip-ws page (slot-get 1633) (slot-get 1632))
         c (string/char-at page p)]
     (cond
       ((>= p (slot-get 1632)) acc)
-      ((= c 42) (do (slot-set 1633 (+ p 1)) (calc-prod-rest page (calc-mul acc (calc-factor page)))))
-      ((= c 47) (do (slot-set 1633 (+ p 1)) (calc-prod-rest page (calc-div acc (calc-factor page)))))
+      ((= c 42) (calc-prod-mul page p acc))
+      ((= c 47) (calc-prod-div page p acc))
       (true acc))))
 
 (defn calc-sum [(page : String @ Region)] : I32
   (calc-sum-rest page (calc-prod page)))
+
+(defn calc-sum-add [(page : String @ Region) (p : I32) (acc : I32)] : I32
+  (do (slot-set 1633 (+ p 1)) (calc-sum-rest page (+ acc (calc-prod page)))))
+
+(defn calc-sum-sub [(page : String @ Region) (p : I32) (acc : I32)] : I32
+  (do (slot-set 1633 (+ p 1)) (calc-sum-rest page (- acc (calc-prod page)))))
 
 (defn calc-sum-rest [(page : String @ Region) (acc : I32)] : I32
   (let [p (skip-ws page (slot-get 1633) (slot-get 1632))
         c (string/char-at page p)]
     (cond
       ((>= p (slot-get 1632)) acc)
-      ((= c 43) (do (slot-set 1633 (+ p 1)) (calc-sum-rest page (+ acc (calc-prod page)))))
-      ((= c 45) (do (slot-set 1633 (+ p 1)) (calc-sum-rest page (- acc (calc-prod page)))))
+      ((= c 43) (calc-sum-add page p acc))
+      ((= c 45) (calc-sum-sub page p acc))
       (true acc))))
 
 ;; calc(...) at page[s,e) -> px (clamped at 0), % taken of pw px; -1 when it is not a calc()
@@ -985,18 +1005,25 @@
     1
     0))
 
+;; VS0 quirk: a `let` inside a `cond` arm of a non-loop function is rejected -- helper fn instead.
+(defn do-newline-fallback [] : I32
+  (let [a (ensure-fill (slot-get 33))
+        s (slot-set 635 0)
+        t (slot-set 636 1)
+        b (next-line)]
+    (md-pop-line)))
+
+(defn do-newline-unhide [] : I32
+  (do (slot-set 635 0) (md-pop-line)))
+
 (defn do-newline [] : I32
   (cond
     ((hidden?) (md-pop-line))
     ((and (> (slot-get 1656) 0) (and (= (slot-get 1657) (slot-get 33)) (<= (slot-get 32) (tget 6))))
      (md-pop-line))
     ((and (= (slot-get 635) 1) (<= (slot-get 32) (tget 6)))
-     (do (slot-set 635 0) (md-pop-line)))
-    (true (let [a (ensure-fill (slot-get 33))
-                s (slot-set 635 0)
-                t (slot-set 636 1)
-                b (next-line)]
-            (md-pop-line)))))
+     (do-newline-unhide))
+    (true (do-newline-fallback))))
 
 ;; ---- drawing one character cell ----
 (defn link-hit [(px : I32) (py : I32) (cw : I32) (ch : I32) (hs : I32) (he : I32)] : I32
@@ -1303,6 +1330,13 @@
 (defn ua-mark [] : I32
   (do (tset 1 0) (tset 2 16769126) 0))
 
+;; VS0 quirk: a `do` inside a `cond` arm (used for its value) is rejected -- helper fns instead.
+(defn ua-style-27 [] : I32
+  (do (ua-v 1 1) (tset 15 36) (tset 13 36)))
+
+(defn ua-style-23 [] : I32
+  (do (tset 1 8421504) (deco-mark 21)))
+
 (defn ua-style [(ua : I32)] : I32
   (cond
     ((= ua 1) (ua-h 4 1 16777215 1))
@@ -1324,9 +1358,9 @@
     ((= ua 20) (ua-list))
     ((= ua 25) (ua-v 1 1))
     ((= ua 26) (tset 15 36))
-    ((= ua 27) (do (ua-v 1 1) (tset 15 36) (tset 13 36)))
+    ((= ua 27) (ua-style-27))
     ((= ua 21) (tset 10 1))
-    ((= ua 23) (do (tset 1 8421504) (deco-mark 21)))
+    ((= ua 23) (ua-style-23))
     ((= ua 24) (deco-mark 20))
     (true 0)))
 
@@ -1636,11 +1670,15 @@
   (let [b (+ 1750 (* k 4))]
     (do (slot-set b h) (slot-set (+ b 1) src) (slot-set (+ b 2) vs) (slot-set (+ b 3) ve) 0)))
 
+;; VS0 quirk: a `do` inside a `cond` arm (used for its value) is rejected -- helper fn instead.
+(defn var-put-new [(h : I32) (src : I32) (vs : I32) (ve : I32)] : I32
+  (do (var-store (slot-get 1740) h src vs ve) (slot-set 1740 (+ (slot-get 1740) 1)) 0))
+
 (defn var-put [(h : I32) (src : I32) (vs : I32) (ve : I32)] : I32
   (let [f (var-find h)]
     (cond
       ((>= f 0) (var-store f h src vs ve))
-      ((< (slot-get 1740) 48) (do (var-store (slot-get 1740) h src vs ve) (slot-set 1740 (+ (slot-get 1740) 1)) 0))
+      ((< (slot-get 1740) 48) (var-put-new h src vs ve))
       (true 0))))
 
 (defn collect-vars [(t : String @ Region) (src : I32) (ds : I32) (de : I32)] : I32
@@ -2595,10 +2633,14 @@
       (if (= ua 9) (bullet) 0))))
 
 ;; canvas colour: <html>'s background when it has one, else <body>'s (CSS "background propagation")
+;; VS0 quirk: a `do` inside a `cond` arm (used for its value) is rejected -- helper fn instead.
+(defn note-page-bg-html [] : I32
+  (do (slot-set 297 (tget 2)) (slot-set 1086 1) 0))
+
 (defn note-page-bg [(is-html : I32)] : I32
   (cond
     ((< (tget 2) 0) 0)
-    ((= is-html 1) (do (slot-set 297 (tget 2)) (slot-set 1086 1) 0))
+    ((= is-html 1) (note-page-bg-html))
     ((= (slot-get 1086) 1) 0)
     (true (slot-set 297 (tget 2)))))
 
@@ -5089,14 +5131,18 @@
 (defn hex-ch [(n : I32)] : I32
   (if (< n 10) (+ 48 n) (+ 55 n)))
 
+;; VS0 quirk: a `let` inside a `cond` arm of a non-loop function is rejected -- helper fn instead.
+(defn fm-enc-ch-pct [(c : I32) (dest : Arena @ Region)] : I32
+  (let [a (lb-add "%")
+        b (lb-add (string/char-from-code (hex-ch (/ c 16)) dest))]
+    (lb-add (string/char-from-code (hex-ch (mod c 16)) dest))))
+
 (defn fm-enc-ch [(c : I32) (dest : Arena @ Region)] : I32
   (cond
     ((or (letter? c) (or (digit? c) (or (= c 45) (or (= c 46) (or (= c 95) (= c 126))))))
      (lb-add (string/char-from-code c dest)))
     ((= c 32) (lb-add "+"))
-    (true (let [a (lb-add "%")
-                b (lb-add (string/char-from-code (hex-ch (/ c 16)) dest))]
-            (lb-add (string/char-from-code (hex-ch (mod c 16)) dest))))))
+    (true (fm-enc-ch-pct c dest))))
 
 (defn fm-ent-code [(p : String @ Region) (i : I32) (e : I32)] : I32
   (if (= (string/char-at p i) 38)
@@ -5188,12 +5234,16 @@
       (slot-set 1095 1)
       (go-link base dest)))
 
+;; VS0 quirk: a `do` inside a `cond` arm (used for its value) is rejected -- helper fn instead.
+(defn fm-send-too-large [] : I32
+  (do (pg-log "form: too large to send (limit ~1000 bytes encoded)") 0))
+
 (defn fm-send [(p : String @ Region) (n : I32) (fpos : I32) (k : I32) (base : String @ Region) (post : I32)
                (dest : Arena @ Region)] : I32
   (let [c (lb-clear)
         x (fm-collect p n fpos k dest)]
     (cond
-      ((> (linebuf-len) 1000) (do (pg-log "form: too large to send (limit ~1000 bytes encoded)") 0))
+      ((> (linebuf-len) 1000) (fm-send-too-large))
       ((= post 1) (fm-go-post base dest))
       (true (fm-go-get base dest)))))
 
@@ -5249,9 +5299,13 @@
 (defn fm-unfocus [] : I32
   (do (slot-set 1088 -1) (slot-set 2 1) 0))
 
+;; VS0 quirk: a `do` inside a `cond` arm (used for its value) is rejected -- helper fn instead.
+(defn on-key-field-enter [] : I32
+  (do (slot-set 1096 (slot-get 1088)) 0))
+
 (defn on-key-field [(k : I32)] : I32
   (cond
-    ((= k (key-return)) (do (slot-set 1096 (slot-get 1088)) 0))
+    ((= k (key-return)) (on-key-field-enter))
     ((= k (key-backspace)) (fm-back))
     ((or (= k 27) (= k 9)) (fm-unfocus))
     (true 0)))
@@ -5363,6 +5417,57 @@
 
 (defn embed-ack [] : I32
   (do (slot-set 4001 -1) (slot-set 4002 -1) 0))
+
+;; ---- embed-nav API (v1.14): PELLEGRINO as a REAL embedded browser ----
+;; Unlike embed-* above (host-supplied static page, never navigates), this surface actually navigates:
+;; embed-nav-start dispatches a real fetch through the exact same machinery the standalone CLI's own
+;; frame-loop uses (start-nav -> nav-dispatch -> open-conn/h3-begin, so TLS and HTTP/3 are included, not
+;; reimplemented), and embed-nav-step pumps that fetch forward one frame at a time (pump-h3, pump-net,
+;; css-pump, img-pump, pump-static -- lifted straight from frame-loop's own loop body) and draws
+;; PELLEGRINO's OWN internal page/stream buffer via cur-page/cur-end (not the page/n the host passes in --
+;; those are only the initial idle-screen source, same role `page` plays for the CLI's file/embedded-page
+;; case). Link clicks and Enter/Tab-activation resolve and navigate automatically inside this call
+;; (resolve-click -> follow-link -> go-link -> start-nav), same as the real browser: the host never needs
+;; to interpret an href itself (unlike the OS-menu's `shankpit:go/N` pseudo-links). The host still owns the
+;; window/renderer/event loop/present and never gets raw socket access; it only gets pixels in and typed
+;; text/clicks/keys out. on-key's "quit" return (Esc/q, value 1) is the host's cue to close this app and
+;; return to its own UI -- this call never exits the process itself.
+(defn embed-nav-open [(w : I32) (h : I32)] : I32
+  (embed-open w h))
+
+(defn embed-nav-start [(url : String @ Region) (dest : Arena @ Region)] : I32
+  (start-nav url dest))
+
+(defn embed-nav-step [(ren : I32) (page : String @ Region) (n : I32) (win-w : I32) (win-h : I32)
+                      (dest : Arena @ Region)] : I32
+  (let [ph (pump-h3 dest)
+        p1 (pump-net dest)
+        pc (css-pump page)
+        pi (img-pump)
+        p2 (pump-static n)
+        cols (/ (- win-w 24) 12)
+        rows (/ (- win-h 52) 18)
+        bg (clear-color ren)
+        cl (sdl2-raw-render-clear ren)
+        last (draw-page ren (cur-page page) (cur-start) (cur-end page) (slot-get 1) cols rows 12 12)
+        ds (draw-status ren win-w win-h)
+        p4 (resolve-click page dest)
+        p5 (ensure-visible rows)
+        p6 (fm-submit page)]
+    last))
+
+(defn embed-nav-click [(x : I32) (y : I32)] : I32
+  (on-click x y))
+
+(defn embed-nav-wheel [(d : I32)] : I32
+  (on-wheel d))
+
+;; returns 1 on Esc/q ("quit" in the standalone CLI) -- the host's cue to close this app, never a real exit
+(defn embed-nav-key [(k : I32) (dest : Arena @ Region)] : I32
+  (on-key k dest))
+
+(defn embed-nav-text [(t : String @ Region)] : I32
+  (on-text t))
 
 (defn pellegrino-run [(arg : String @ Region)] : I32
   (with-arena [a :region/scratch 65536]
