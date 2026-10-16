@@ -4,3 +4,5 @@ dist/
 *.log
 MODULE.bazel.lock
 user.bazelrc
+/pellegrino
+/pellegrino.exe
